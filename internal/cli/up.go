@@ -90,7 +90,16 @@ func up(ctx context.Context, target string, f upFlags, log io.Writer) (workspace
 	if err != nil {
 		return workspace.State{}, err
 	}
-	eng, err := engine.Detect(firstNonEmpty(f.engine, cfg.Engine))
+	// An existing workspace stays on the engine it was created with; moving
+	// it would leave its container behind on the old engine.
+	recorded := ""
+	if prev, err := workspace.Load(name); err == nil {
+		recorded = prev.Engine
+	}
+	if f.engine != "" && recorded != "" && f.engine != recorded {
+		return workspace.State{}, fmt.Errorf("workspace %s runs on %s; to move it to %s, `castra delete %s` first", name, recorded, f.engine, name)
+	}
+	eng, err := engine.Detect(firstNonEmpty(f.engine, recorded, cfg.Engine))
 	if err != nil {
 		return workspace.State{}, err
 	}

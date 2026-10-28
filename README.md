@@ -4,7 +4,7 @@ castra builds a devcontainer from your project's `.devcontainer` folder, runs it
 
 Roman legions built a camp, a *castra*, at the end of every day's march, always to the same plan, so every soldier knew exactly where his tent was (Polybius, *Histories* 6.41). castra builds the same container every time.
 
-> **Status: early.** Tested on Linux with rootless Podman 5 (Fedora 43, SELinux enforcing). Docker and macOS are not tested yet ([#1](https://github.com/mischavandenburg/castra/issues/1)). There is no license yet ([#2](https://github.com/mischavandenburg/castra/issues/2)), which means you may read the code but not reuse it until one is chosen.
+> **Status: early.** Tested on Linux with rootless Podman 5 and with Docker 29 (Fedora 43, SELinux enforcing). macOS is not tested yet ([#1](https://github.com/mischavandenburg/castra/issues/1)). There is no license yet ([#2](https://github.com/mischavandenburg/castra/issues/2)), which means you may read the code but not reuse it until one is chosen.
 
 ## Why
 
@@ -95,6 +95,12 @@ On the first `up` of each new container, castra clones it to `~/dotfiles` inside
 - **The environment** inside a session is the container's own, plus devcontainer.json's `remoteEnv`, plus `REMOTE_CONTAINERS=true`, `CASTRA=true` and `CASTRA_WORKSPACE=<name>`. `REMOTE_CONTAINERS` is what VS Code and DevPod set, and many dotfiles check it to know they run in a devcontainer, for example to leave `SSH_AUTH_SOCK` alone. Lifecycle commands get the same three variables.
 
 castra keeps its files in `~/.ssh/castra/` (its SSH config, client key and pinned host keys), `~/.local/state/castra/` (one record per workspace) and `~/.config/castra/config.yaml`. The only change it makes outside those is one `Include` line at the top of `~/.ssh/config`.
+
+## Podman or Docker
+
+castra uses Podman when it is installed, otherwise Docker; `castra up --engine docker` (or `engine: docker` in the config file) picks one. A workspace stays on the engine it was created with: to move it, `castra delete` it and run `up` again.
+
+One devcontainer.json difference to know: the `z` and `Z` options in a `mounts` entry (`...,type=bind,z`) are Podman-only. Docker refuses them ("invalid field 'z'"). On an SELinux host with Docker, use `"runArgs": ["--security-opt", "label=disable"]` instead.
 
 ## Rootless Podman on a machine you reach over SSH
 
