@@ -85,17 +85,6 @@ dotfiles:
 
 On the first `up` of each new container, castra clones it to `~/dotfiles` inside the container and runs the first of `install.sh`, `install`, `bootstrap.sh`, `bootstrap`, `setup.sh`, `setup` it finds. The clone goes over SSH with your forwarded agent, so a private repository works without copying any key into the container. Set `dotfiles.install` to run a different command instead.
 
-## Passing variables from your machine
-
-List host environment variables in `sendEnv` and castra passes them into every session, the dotfiles install included, whenever they are set in your shell (this is OpenSSH's `SendEnv`; a trailing `*` matches a prefix). The values stay in your shell, never in a file.
-
-```yaml
-sendEnv:
-  - GITHUB_TOKEN
-```
-
-`GITHUB_TOKEN` is the common one: tools that download from GitHub, such as mise installing your dotfiles' tools, hit GitHub's limit of 60 API requests an hour without it.
-
 ## How it works
 
 - **Building** is done by Microsoft's devcontainer CLI. Features, lifecycle commands, mounts and `runArgs` behave as the spec says.

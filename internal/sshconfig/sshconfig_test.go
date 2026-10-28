@@ -21,7 +21,7 @@ func testPaths(t *testing.T) Paths {
 
 func TestRenderBlock(t *testing.T) {
 	p := testPaths(t)
-	cfg := Render([]workspace.State{{Name: "demo", RemoteUser: "dev"}}, "/opt/my tools/castra", p, nil)
+	cfg := Render([]workspace.State{{Name: "demo", RemoteUser: "dev"}}, "/opt/my tools/castra", p)
 	for _, want := range []string{
 		"Host demo.castra\n",
 		"HostKeyAlias demo.castra\n",
@@ -38,18 +38,6 @@ func TestRenderBlock(t *testing.T) {
 	}
 	if strings.Contains(cfg, "StrictHostKeyChecking no") {
 		t.Error("host key checking switched off")
-	}
-}
-
-func TestRenderSendEnv(t *testing.T) {
-	p := testPaths(t)
-	states := []workspace.State{{Name: "demo", RemoteUser: "dev"}}
-	if cfg := Render(states, "/bin/castra", p, nil); strings.Contains(cfg, "  SendEnv ") {
-		t.Fatalf("SendEnv written with nothing configured:\n%s", cfg)
-	}
-	cfg := Render(states, "/bin/castra", p, []string{"GITHUB_TOKEN", "LC_*"})
-	if !strings.Contains(cfg, "  SendEnv GITHUB_TOKEN LC_*\n") {
-		t.Fatalf("config lacks the SendEnv line:\n%s", cfg)
 	}
 }
 

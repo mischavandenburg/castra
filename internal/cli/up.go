@@ -176,11 +176,7 @@ func writeSSHConfig(paths sshconfig.Paths) error {
 	if err != nil {
 		return err
 	}
-	cfg, err := config.Load()
-	if err != nil {
-		return err
-	}
-	return paths.WriteConfig(all, self, cfg.SendEnv)
+	return paths.WriteConfig(all, self)
 }
 
 func executable() (string, error) {
