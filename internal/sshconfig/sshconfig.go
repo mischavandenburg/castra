@@ -163,7 +163,8 @@ func (p Paths) otherHostLines(alias string) ([]string, error) {
 
 // Render produces castra's ssh config: one Host block per workspace, each
 // reaching the container through `castra proxy` with no network in between.
-func Render(states []workspace.State, castraBin string, p Paths) string {
+// sendEnv names the host variables OpenSSH passes into sessions.
+func Render(states []workspace.State, castraBin string, p Paths, sendEnv []string) string {
 	var b strings.Builder
 	b.WriteString("# Managed by castra. Rewritten on every `castra up`; edits are lost.\n")
 	for _, s := range states {
@@ -176,6 +177,9 @@ func Render(states []workspace.State, castraBin string, p Paths) string {
 		fmt.Fprintf(&b, "  UserKnownHostsFile %s\n", quote(p.KnownHosts))
 		b.WriteString("  StrictHostKeyChecking yes\n")
 		b.WriteString("  ForwardAgent yes\n")
+		if len(sendEnv) > 0 {
+			fmt.Fprintf(&b, "  SendEnv %s\n", strings.Join(sendEnv, " "))
+		}
 		b.WriteString("  ServerAliveInterval 30\n")
 		b.WriteString("  LogLevel ERROR\n")
 	}
@@ -199,11 +203,11 @@ func quote(path string) string {
 }
 
 // WriteConfig writes castra's ssh config file.
-func (p Paths) WriteConfig(states []workspace.State, castraBin string) error {
+func (p Paths) WriteConfig(states []workspace.State, castraBin string, sendEnv []string) error {
 	if err := p.ensureDirs(); err != nil {
 		return err
 	}
-	return writeAtomic(p.Config, []byte(Render(states, castraBin, p)), 0o600)
+	return writeAtomic(p.Config, []byte(Render(states, castraBin, p, sendEnv)), 0o600)
 }
 
 const (
