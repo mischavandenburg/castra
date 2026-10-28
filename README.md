@@ -5,9 +5,9 @@
 </p>
 <p align="center"><sub>The plan every Roman marching camp was built to, after Polybius. Image: <a href="https://commons.wikimedia.org/wiki/File:Marschlager_nach_Polybios.png">Mediatus</a>, <a href="https://creativecommons.org/licenses/by-sa/3.0/">CC BY-SA 3.0</a>, via Wikimedia Commons, unmodified.</sub></p>
 
-castra builds a devcontainer from your project's `.devcontainer` folder, runs it on Podman (or Docker) on your own machine, and lets you in over SSH with your ssh-agent forwarded. That's all it does.
+*Castra* is Latin for the camp a Roman legion built at the end of every day's march and tore down again the next morning. It was built to one plan and looked the same every time, so every soldier knew exactly where his tent was (Polybius, *Histories* 6.41). castra does the same for your devcontainer.
 
-Roman legions built a camp, a *castra*, at the end of every day's march, always to the same plan, so every soldier knew exactly where his tent was (Polybius, *Histories* 6.41). castra builds the same container every time.
+castra builds a devcontainer from your project's `.devcontainer` folder, runs it on Podman (or Docker) on your own machine, and lets you in over SSH with your ssh-agent forwarded. That's all it does.
 
 > **Status: early.** Tested on Linux with rootless Podman 5 and with Docker 29 (Fedora 43, SELinux enforcing). macOS is not tested yet ([#1](https://github.com/mischavandenburg/castra/issues/1)). There is no license yet ([#2](https://github.com/mischavandenburg/castra/issues/2)), which means you may read the code but not reuse it until one is chosen.
 
