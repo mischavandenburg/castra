@@ -15,7 +15,9 @@ import (
 
 // dotfilesScript clones the dotfiles repo into ~/dotfiles and runs its
 // installer. It runs inside the container through castra's own SSH session,
-// so a private repo cloned over SSH uses the forwarded agent.
+// so a private repo cloned over SSH uses the forwarded agent. Only a
+// successful install writes the marker that later runs skip on, so a failed
+// install is retried by the next `castra up`.
 func dotfilesScript(repo, install string, refresh bool) string {
 	q := shellescape.Quote
 	refreshFlag := "0"
@@ -24,20 +26,29 @@ func dotfilesScript(repo, install string, refresh bool) string {
 	}
 	return `set -e
 d="$HOME/dotfiles"
+marker="$HOME/.castra/dotfiles-installed"
+repo=` + q(repo) + `
+if [ -f "$marker" ] && [ "$(cat "$marker")" = "$repo" ] && [ ` + refreshFlag + ` != 1 ]; then
+  echo "castra: dotfiles already installed in $d, skipping"; exit 0
+fi
 export GIT_SSH_COMMAND="ssh -o StrictHostKeyChecking=accept-new"
 if [ -d "$d/.git" ]; then
-  if [ ` + refreshFlag + ` != 1 ]; then echo "castra: dotfiles already in $d, skipping"; exit 0; fi
   git -C "$d" pull --ff-only
 else
-  git clone ` + q(repo) + ` "$d"
+  git clone "$repo" "$d"
 fi
 cd "$d"
 install=` + q(install) + `
-if [ -n "$install" ]; then sh -c "$install"; exit 0; fi
-for f in install.sh install bootstrap.sh bootstrap setup.sh setup; do
-  if [ -f "$f" ]; then chmod +x "$f"; echo "castra: running dotfiles/$f"; "./$f"; exit 0; fi
-done
-echo "castra: no install script in $d"
+if [ -n "$install" ]; then
+  sh -c "$install"
+else
+  ran=0
+  for f in install.sh install bootstrap.sh bootstrap setup.sh setup; do
+    if [ -f "$f" ]; then chmod +x "$f"; echo "castra: running dotfiles/$f"; "./$f"; ran=1; break; fi
+  done
+  [ $ran = 1 ] || echo "castra: no install script in $d"
+fi
+mkdir -p "$(dirname "$marker")" && printf %s "$repo" > "$marker"
 `
 }
 
@@ -53,7 +64,7 @@ func installDotfiles(ctx context.Context, st workspace.State, paths sshconfig.Pa
 	cmd.Stderr = log
 	cmd.Env = os.Environ() // carries SSH_AUTH_SOCK, so the agent is forwarded
 	if err := cmd.Run(); err != nil {
-		return fmt.Errorf("dotfiles: %w", err)
+		return fmt.Errorf("%s is up, but installing your dotfiles failed (%v, output above); fix the cause and run `castra up %s` again to retry", st.Name, err, st.Name)
 	}
 	return nil
 }

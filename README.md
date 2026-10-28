@@ -83,7 +83,7 @@ dotfiles:
   repo: git@github.com:you/dotfiles.git
 ```
 
-On the first `up` of each new container, castra clones it to `~/dotfiles` inside the container and runs the first of `install.sh`, `install`, `bootstrap.sh`, `bootstrap`, `setup.sh`, `setup` it finds. The clone goes over SSH with your forwarded agent, so a private repository works without copying any key into the container. Set `dotfiles.install` to run a different command instead.
+On the first `up` of each new container, castra clones it to `~/dotfiles` inside the container and runs the first of `install.sh`, `install`, `bootstrap.sh`, `bootstrap`, `setup.sh`, `setup` it finds. The clone goes over SSH with your forwarded agent, so a private repository works without copying any key into the container. Set `dotfiles.install` to run a different command instead. If the install fails, `castra up` says so (the container is still up), and the next `castra up` pulls the repo and runs the install again; once it has succeeded, later runs skip it (`--dotfiles-refresh` forces a rerun).
 
 ## How it works
 
