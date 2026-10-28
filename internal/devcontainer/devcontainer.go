@@ -4,57 +4,110 @@ package devcontainer
 
 import (
 	"bufio"
+	"bytes"
 	"context"
 	"encoding/json"
-	"errors"
 	"fmt"
 	"io"
 	"os"
 	"os/exec"
-	"path/filepath"
+	"strconv"
 	"strings"
 	"time"
 
 	"github.com/mischavandenburg/castra/internal/workspace"
 )
 
-// CLIVersion is the devcontainer CLI release `castra install-deps` installs.
-const CLIVersion = "0.90.0"
+// MinCLIVersion is the oldest devcontainer CLI castra has been verified with
+// end to end. Newer releases are accepted, so `mise up` keeps working.
+const MinCLIVersion = "0.89.0"
 
-// InstallPrefix is where `castra install-deps` puts the CLI and its own Node.
-func InstallPrefix() (string, error) {
-	if d := os.Getenv("XDG_DATA_HOME"); d != "" {
-		return filepath.Join(d, "castra"), nil
-	}
-	home, err := os.UserHomeDir()
-	if err != nil {
-		return "", err
-	}
-	return filepath.Join(home, ".local", "share", "castra"), nil
+// InstallHint says how to get the CLI. castra never installs it itself.
+const InstallHint = `  install it with mise:  mise use -g node@lts npm:@devcontainers/cli
+  or with npm:           npm install -g @devcontainers/cli`
+
+// CLI is a devcontainer CLI castra has found, run, and version-checked.
+type CLI struct {
+	Path    string
+	Version string
 }
 
-// FindCLI locates the devcontainer CLI: $CASTRA_DEVCONTAINER, then PATH, then
-// the copy `castra install-deps` installed.
-func FindCLI() (string, error) {
-	if p := os.Getenv("CASTRA_DEVCONTAINER"); p != "" {
-		return p, nil
+// FindCLI locates the devcontainer CLI ($CASTRA_DEVCONTAINER, then PATH),
+// runs it, and checks its version. Every error says how to fix it.
+func FindCLI(ctx context.Context) (CLI, error) {
+	path := os.Getenv("CASTRA_DEVCONTAINER")
+	if path == "" {
+		p, err := exec.LookPath("devcontainer")
+		if err != nil {
+			return CLI{}, fmt.Errorf("the devcontainer CLI is not on your PATH; castra needs it to build containers\n%s", InstallHint)
+		}
+		path = p
 	}
-	if p, err := exec.LookPath("devcontainer"); err == nil {
-		return p, nil
+
+	ctx, cancel := context.WithTimeout(ctx, 30*time.Second)
+	defer cancel()
+	var stderr bytes.Buffer
+	cmd := exec.CommandContext(ctx, path, "--version")
+	cmd.Stderr = &stderr
+	out, err := cmd.Output()
+	if err != nil {
+		detail := strings.TrimSpace(stderr.String())
+		if detail == "" {
+			detail = strings.TrimSpace(string(out))
+		}
+		if detail != "" {
+			detail = ":\n  " + strings.ReplaceAll(detail, "\n", "\n  ")
+		}
+		return CLI{Path: path}, fmt.Errorf("the devcontainer CLI at %s does not run (%v)%s\n%s", path, err, detail, InstallHint)
 	}
-	if prefix, err := InstallPrefix(); err == nil {
-		p := filepath.Join(prefix, "bin", "devcontainer")
-		if fi, err := os.Stat(p); err == nil && !fi.IsDir() {
-			return p, nil
+
+	version := lastLine(string(out))
+	got, ok := parseVersion(version)
+	if !ok {
+		return CLI{Path: path}, fmt.Errorf("the devcontainer CLI at %s printed %q for --version, which is not a version", path, version)
+	}
+	want, _ := parseVersion(MinCLIVersion)
+	if older(got, want) {
+		return CLI{Path: path, Version: version}, fmt.Errorf(
+			"the devcontainer CLI at %s is version %s; castra needs %s or newer\n  upgrade it with mise:  mise up npm:@devcontainers/cli\n  or with npm:           npm install -g @devcontainers/cli",
+			path, version, MinCLIVersion)
+	}
+	return CLI{Path: path, Version: version}, nil
+}
+
+func lastLine(s string) string {
+	lines := strings.Split(strings.TrimSpace(s), "\n")
+	return strings.TrimSpace(lines[len(lines)-1])
+}
+
+// parseVersion reads "1.2.3", "v1.2.3" or "1.2.3-beta.1" as three numbers.
+func parseVersion(s string) ([3]int, bool) {
+	var v [3]int
+	s = strings.TrimPrefix(s, "v")
+	if i := strings.IndexAny(s, "-+ "); i >= 0 {
+		s = s[:i]
+	}
+	parts := strings.Split(s, ".")
+	if len(parts) != 3 {
+		return v, false
+	}
+	for i, p := range parts {
+		n, err := strconv.Atoi(p)
+		if err != nil || n < 0 {
+			return v, false
+		}
+		v[i] = n
+	}
+	return v, true
+}
+
+func older(a, b [3]int) bool {
+	for i := range a {
+		if a[i] != b[i] {
+			return a[i] < b[i]
 		}
 	}
-	return "", errors.New("devcontainer CLI not found: run `castra install-deps`")
-}
-
-// Version asks the CLI for its version.
-func Version(ctx context.Context, cli string) (string, error) {
-	out, err := exec.CommandContext(ctx, cli, "--version").Output()
-	return strings.TrimSpace(string(out)), err
+	return false
 }
 
 // UpOptions describes one `devcontainer up` run.
@@ -164,9 +217,4 @@ func Up(ctx context.Context, opts UpOptions) (Result, error) {
 		return res, fmt.Errorf("devcontainer up result lacks containerId or remoteUser")
 	}
 	return res, nil
-}
-
-// InstallScriptURL is the official installer, pinned to the CLI release.
-func InstallScriptURL() string {
-	return "https://raw.githubusercontent.com/devcontainers/cli/v" + CLIVersion + "/scripts/install.sh"
 }

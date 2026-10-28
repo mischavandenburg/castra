@@ -63,6 +63,52 @@ func TestUpReportsCLIError(t *testing.T) {
 	}
 }
 
+func TestFindCLIMissing(t *testing.T) {
+	t.Setenv("CASTRA_DEVCONTAINER", "")
+	t.Setenv("PATH", t.TempDir())
+	_, err := FindCLI(context.Background())
+	if err == nil || !strings.Contains(err.Error(), "not on your PATH") || !strings.Contains(err.Error(), "mise use -g node@lts npm:@devcontainers/cli") {
+		t.Fatalf("missing CLI: %v", err)
+	}
+}
+
+func TestFindCLIOnPath(t *testing.T) {
+	dir := filepath.Dir(fakeCLI(t, `echo 0.90.0`))
+	t.Setenv("CASTRA_DEVCONTAINER", "")
+	t.Setenv("PATH", dir)
+	cli, err := FindCLI(context.Background())
+	if err != nil || cli.Version != "0.90.0" || cli.Path != filepath.Join(dir, "devcontainer") {
+		t.Fatalf("FindCLI = %+v, %v", cli, err)
+	}
+}
+
+func TestFindCLIChecks(t *testing.T) {
+	cases := []struct {
+		name, script string
+		wantErr      string // empty: must succeed
+	}{
+		{"oldest verified release", `echo 0.89.0`, ""},
+		{"newer release", `echo 1.4.2`, ""},
+		{"v prefix and a log line", `echo "starting"; echo v0.91.0`, ""},
+		{"too old", `echo 0.88.9`, "castra needs 0.89.0 or newer"},
+		{"mise shim with no version set", `echo "mise ERROR No version is set for shim: devcontainer" >&2; exit 1`, "No version is set for shim"},
+		{"broken node", `echo "node: not found" >&2; exit 127`, "does not run"},
+		{"not a version", `echo "hello"`, "not a version"},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			t.Setenv("CASTRA_DEVCONTAINER", fakeCLI(t, c.script))
+			_, err := FindCLI(context.Background())
+			switch {
+			case c.wantErr == "" && err != nil:
+				t.Fatalf("unexpected error: %v", err)
+			case c.wantErr != "" && (err == nil || !strings.Contains(err.Error(), c.wantErr)):
+				t.Fatalf("want an error containing %q, got %v", c.wantErr, err)
+			}
+		})
+	}
+}
+
 func TestUpWithoutResultFails(t *testing.T) {
 	cli := fakeCLI(t, `echo "not json"; exit 2`)
 	if _, err := Up(context.Background(), UpOptions{CLI: cli, EnginePath: "podman", Folder: "/x", Name: "demo", Stderr: io.Discard}); err == nil {

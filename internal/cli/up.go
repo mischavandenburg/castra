@@ -93,7 +93,7 @@ func up(ctx context.Context, target string, f upFlags, log io.Writer) (workspace
 	if err != nil {
 		return workspace.State{}, err
 	}
-	cli, err := devcontainer.FindCLI()
+	cli, err := devcontainer.FindCLI(ctx)
 	if err != nil {
 		return workspace.State{}, err
 	}
@@ -114,7 +114,7 @@ func up(ctx context.Context, target string, f upFlags, log io.Writer) (workspace
 
 	fmt.Fprintf(log, "castra: pitching camp for %s from %s with %s\n", name, folder, eng.Name)
 	res, err := devcontainer.Up(ctx, devcontainer.UpOptions{
-		CLI: cli, EnginePath: eng.Path, Folder: folder, Name: name, Recreate: f.recreate, Stderr: log,
+		CLI: cli.Path, EnginePath: eng.Path, Folder: folder, Name: name, Recreate: f.recreate, Stderr: log,
 	})
 	if err != nil {
 		return workspace.State{}, err

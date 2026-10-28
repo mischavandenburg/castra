@@ -12,15 +12,19 @@ Roman legions built a camp, a *castra*, at the end of every day's march, always 
 
 ## Install
 
-You need Go 1.26 or newer, Podman (or Docker), and the OpenSSH client.
+You need four things: Go 1.26 or newer, Podman (or Docker), the OpenSSH client, and Microsoft's [devcontainer CLI](https://github.com/devcontainers/cli) on your `PATH`. castra uses that CLI for all the devcontainer.json work and does not install it for you, so you update it the same way you update your other tools.
+
+With [mise](https://mise.jdx.dev):
 
 ```console
+mise use -g node@lts npm:@devcontainers/cli
 go install github.com/mischavandenburg/castra@latest
-castra install-deps
 castra doctor
 ```
 
-`castra install-deps` installs Microsoft's [devcontainer CLI](https://github.com/devcontainers/cli) with its own copy of Node under `~/.local/share/castra`. You don't need Node installed yourself. If `devcontainer` is already on your `PATH`, castra uses that one.
+Without mise, install the CLI with npm instead: `npm install -g @devcontainers/cli`.
+
+`castra doctor` checks everything castra needs. Every `castra up` checks the CLI first: if it is missing, does not run, or is older than 0.89.0 (the oldest release castra is verified with), castra stops and tells you the command that fixes it. Upgrading is `mise up npm:@devcontainers/cli`.
 
 ## Use
 
