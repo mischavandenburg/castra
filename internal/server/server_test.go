@@ -32,6 +32,16 @@ type harness struct {
 // the x/crypto client.
 func start(t *testing.T, dialKey ssh.Signer) (*harness, error) {
 	t.Helper()
+	return startServer(t, dialKey, nil)
+}
+
+func startWith(t *testing.T, remoteEnv map[string]*string) (*harness, error) {
+	t.Helper()
+	return startServer(t, nil, remoteEnv)
+}
+
+func startServer(t *testing.T, dialKey ssh.Signer, remoteEnv map[string]*string) (*harness, error) {
+	t.Helper()
 	hostPEM, hostPub, err := sshconfig.NewKey("test-host")
 	if err != nil {
 		t.Fatal(err)
@@ -57,6 +67,8 @@ func start(t *testing.T, dialKey ssh.Signer) (*harness, error) {
 			HostKey:       hostPEM,
 			AuthorizedKey: ssh.MarshalAuthorizedKey(clientSigner.PublicKey()),
 			Workdir:       workdir,
+			Workspace:     "demo",
+			RemoteEnv:     remoteEnv,
 		})
 	}()
 
@@ -87,6 +99,54 @@ func TestExecOutputAndExitStatus(t *testing.T) {
 	workdir, _ := filepath.EvalSymlinks(h.workdir) // macOS temp dirs sit behind /private
 	if want := workdir + "\nhi\n"; string(out) != want {
 		t.Fatalf("output %q, want %q", out, want)
+	}
+}
+
+// TestDevcontainerMarkers: dotfiles test REMOTE_CONTAINERS to know they are in
+// a devcontainer; without it a common setup replaces the forwarded agent.
+func TestDevcontainerMarkers(t *testing.T) {
+	t.Setenv("REMOTE_CONTAINERS", "")
+	os.Unsetenv("REMOTE_CONTAINERS")
+	h, err := start(t, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	s, _ := h.client.NewSession()
+	out, err := s.Output(`printf '%s %s %s' "$REMOTE_CONTAINERS" "$CASTRA" "$CASTRA_WORKSPACE"`)
+	if err != nil || string(out) != "true true demo" {
+		t.Fatalf("markers %q, %v", out, err)
+	}
+}
+
+func TestRemoteEnvAppliesAndUnsets(t *testing.T) {
+	t.Setenv("CASTRA_TEST_UNSET_ME", "from-the-container")
+	t.Setenv("CASTRA_TEST_OVERRIDE", "from-the-container")
+	val := func(s string) *string { return &s }
+	h, err := startWith(t, map[string]*string{
+		"CASTRA_TEST_REMOTE":   val("from-remoteEnv"),
+		"CASTRA_TEST_OVERRIDE": val("from-remoteEnv"),
+		"CASTRA_TEST_UNSET_ME": nil,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	s, _ := h.client.NewSession()
+	out, err := s.Output(`printf '%s|%s|%s' "$CASTRA_TEST_REMOTE" "$CASTRA_TEST_OVERRIDE" "${CASTRA_TEST_UNSET_ME-unset}"`)
+	if err != nil || string(out) != "from-remoteEnv|from-remoteEnv|unset" {
+		t.Fatalf("remoteEnv applied as %q, %v", out, err)
+	}
+}
+
+func TestContainerEnvWinsOverMarkers(t *testing.T) {
+	t.Setenv("REMOTE_CONTAINERS", "set-by-the-container")
+	h, err := start(t, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	s, _ := h.client.NewSession()
+	out, err := s.Output(`printf %s "$REMOTE_CONTAINERS"`)
+	if err != nil || string(out) != "set-by-the-container" {
+		t.Fatalf("REMOTE_CONTAINERS %q, %v", out, err)
 	}
 }
 

@@ -134,11 +134,25 @@ func (o UpOptions) Args() []string {
 		"--workspace-folder", o.Folder,
 		"--id-label", workspace.Label + "=" + o.Name,
 		"--log-format", "text",
+		// The resolved remoteEnv comes back in the result, for castra's sessions.
+		"--include-merged-configuration",
+	}
+	// The devcontainer markers castra's sessions get, for the lifecycle
+	// commands too (DevPod sets them on the container itself).
+	for _, kv := range MarkerEnv(o.Name) {
+		args = append(args, "--remote-env", kv)
 	}
 	if o.Recreate {
 		args = append(args, "--remove-existing-container")
 	}
 	return args
+}
+
+// MarkerEnv is what tells dotfiles and scripts they run in a devcontainer:
+// REMOTE_CONTAINERS is the VS Code and DevPod convention (DevPod also sets
+// DEVPOD and DEVPOD_WORKSPACE_ID, which CASTRA and CASTRA_WORKSPACE mirror).
+func MarkerEnv(name string) []string {
+	return []string{"REMOTE_CONTAINERS=true", "CASTRA=true", "CASTRA_WORKSPACE=" + name}
 }
 
 // Result is what `devcontainer up` prints on success.
@@ -149,6 +163,11 @@ type Result struct {
 	ContainerID           string `json:"containerId"`
 	RemoteUser            string `json:"remoteUser"`
 	RemoteWorkspaceFolder string `json:"remoteWorkspaceFolder"`
+	MergedConfiguration   struct {
+		// RemoteEnv is devcontainer.json's remoteEnv with ${containerEnv:...}
+		// already resolved; a null value means unset the variable.
+		RemoteEnv map[string]*string `json:"remoteEnv"`
+	} `json:"mergedConfiguration"`
 }
 
 // Up runs `devcontainer up` and returns its result. Build output streams to

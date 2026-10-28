@@ -1,12 +1,13 @@
 {
   // The shape castra is tested against: a Dockerfile build, a non-root user,
   // host networking, labels off, a bind mount with the z option, container
-  // env, and both lifecycle hooks.
+  // env, remote env, and both lifecycle hooks.
   "name": "castra e2e",
   "build": { "dockerfile": "Dockerfile" },
   "remoteUser": "vscode",
   "runArgs": ["--network=host", "--security-opt", "label=disable"],
   "containerEnv": { "CASTRA_FIXTURE": "yes" },
+  "remoteEnv": { "CASTRA_FIXTURE_REMOTE": "yes", "PATH": "${containerEnv:PATH}:/opt/fixture/bin" },
   "mounts": [
     "source=${localWorkspaceFolder}/mounted,target=/mnt/fixture,type=bind,z"
   ],

@@ -1,6 +1,7 @@
 package cli
 
 import (
+	"encoding/json"
 	"errors"
 	"fmt"
 	"os"
@@ -116,6 +117,8 @@ func newProxyCmd() *cobra.Command {
 				"--host-key", hostKeyPath(st),
 				"--authorized-key", strings.TrimSpace(string(pub)),
 				"--workdir", st.Workdir,
+				"--workspace", st.Name,
+				"--remote-env-file", remoteEnvPath(st),
 			)
 			return syscall.Exec(argv[0], argv, os.Environ())
 		},
@@ -126,7 +129,7 @@ func newProxyCmd() *cobra.Command {
 // nothing else may ever be written there.
 func newServerCmd() *cobra.Command {
 	var stdio bool
-	var hostKey, authorizedKey, workdir string
+	var hostKey, authorizedKey, workdir, workspaceName, remoteEnvFile string
 	cmd := &cobra.Command{
 		Use:    "server",
 		Hidden: true,
@@ -139,10 +142,25 @@ func newServerCmd() *cobra.Command {
 			if err != nil {
 				return err
 			}
+			var remoteEnv map[string]*string
+			if remoteEnvFile != "" {
+				b, err := os.ReadFile(remoteEnvFile)
+				switch {
+				case errors.Is(err, os.ErrNotExist): // written by `castra up`; older containers lack it
+				case err != nil:
+					return err
+				default:
+					if err := json.Unmarshal(b, &remoteEnv); err != nil {
+						return fmt.Errorf("%s: %w", remoteEnvFile, err)
+					}
+				}
+			}
 			return server.ServeStdio(server.Options{
 				HostKey:       key,
 				AuthorizedKey: []byte(authorizedKey),
 				Workdir:       workdir,
+				Workspace:     workspaceName,
+				RemoteEnv:     remoteEnv,
 			})
 		},
 	}
@@ -150,5 +168,7 @@ func newServerCmd() *cobra.Command {
 	cmd.Flags().StringVar(&hostKey, "host-key", "", "path of the private host key")
 	cmd.Flags().StringVar(&authorizedKey, "authorized-key", "", "the one client public key allowed in (authorized_keys format)")
 	cmd.Flags().StringVar(&workdir, "workdir", "", "directory sessions start in")
+	cmd.Flags().StringVar(&workspaceName, "workspace", "", "workspace name, exported as CASTRA_WORKSPACE")
+	cmd.Flags().StringVar(&remoteEnvFile, "remote-env-file", "", "JSON file with devcontainer.json's resolved remoteEnv")
 	return cmd
 }

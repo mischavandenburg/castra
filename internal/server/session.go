@@ -24,11 +24,13 @@ import (
 // session is one SSH session channel: a shell, a command, or the sftp
 // subsystem, plus the agent socket when the client forwards its agent.
 type session struct {
-	conn    *ssh.ServerConn
-	ch      ssh.Channel
-	workdir string
-	log     *slog.Logger
-	gone    <-chan struct{} // closed when the client connection ends
+	conn      *ssh.ServerConn
+	ch        ssh.Channel
+	workdir   string
+	workspace string
+	remoteEnv map[string]*string
+	log       *slog.Logger
+	gone      <-chan struct{} // closed when the client connection ends
 
 	mu      sync.Mutex
 	env     []string
@@ -400,9 +402,10 @@ func (s *session) startDir(home string) string {
 	return home
 }
 
-// environ is the container's environment (what `podman exec` handed us) plus
-// the login variables, the client's env requests, the terminal and the agent.
-// Called with s.mu held.
+// environ builds a session's environment, later layers winning: the
+// devcontainer markers, the container's environment (what `podman exec`
+// handed us), the client's env requests, devcontainer.json's remoteEnv, then
+// the login variables, the terminal and the agent. Called with s.mu held.
 func (s *session) environ(a account, req *ptyRequest) []string {
 	vars := map[string]string{}
 	var order []string
@@ -416,11 +419,26 @@ func (s *session) environ(a account, req *ptyRequest) []string {
 		}
 		vars[k] = v
 	}
+	// The markers DevPod and VS Code set, which dotfiles test to tell they are
+	// in a devcontainer (a common one: leave SSH_AUTH_SOCK alone when
+	// REMOTE_CONTAINERS is set). Defaults: the container's own env wins.
+	set("REMOTE_CONTAINERS=true")
+	set("CASTRA=true")
+	if s.workspace != "" {
+		set("CASTRA_WORKSPACE=" + s.workspace)
+	}
 	for _, kv := range os.Environ() {
 		set(kv)
 	}
 	for _, kv := range s.env {
 		set(kv)
+	}
+	for k, v := range s.remoteEnv {
+		if v == nil {
+			delete(vars, k) // order may still list k; the loop below skips it
+			continue
+		}
+		set(k + "=" + *v)
 	}
 	set("HOME=" + a.home)
 	set("USER=" + a.name)
@@ -433,8 +451,14 @@ func (s *session) environ(a account, req *ptyRequest) []string {
 		set("SSH_AUTH_SOCK=" + sock)
 	}
 	out := make([]string, 0, len(order))
+	emitted := map[string]bool{}
 	for _, k := range order {
-		out = append(out, k+"="+vars[k])
+		v, ok := vars[k]
+		if !ok || emitted[k] { // unset by remoteEnv, or listed twice after a re-set
+			continue
+		}
+		emitted[k] = true
+		out = append(out, k+"="+v)
 	}
 	return out
 }

@@ -5,6 +5,7 @@ import (
 	"context"
 	"crypto/sha256"
 	"encoding/hex"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
@@ -130,6 +131,9 @@ func up(ctx context.Context, target string, f upFlags, log io.Writer) (workspace
 	if err := installServer(ctx, eng, st, log); err != nil {
 		return st, err
 	}
+	if err := writeRemoteEnv(ctx, eng, st, res.MergedConfiguration.RemoteEnv); err != nil {
+		return st, err
+	}
 	prev, prevErr := workspace.Load(name)
 	if prevErr != nil || prev.ContainerID != st.ContainerID || !paths.HasHostKey(st.Alias()) || !remoteHasHostKey(ctx, eng, st) {
 		if err := rotateHostKey(ctx, eng, st, paths); err != nil {
@@ -197,9 +201,28 @@ func remoteHome(ctx context.Context, eng engine.Engine, st workspace.State) (str
 	return home, nil
 }
 
-func castraDir(st workspace.State) string   { return st.RemoteHome + "/.castra" }
-func serverPath(st workspace.State) string  { return castraDir(st) + "/bin/castra" }
-func hostKeyPath(st workspace.State) string { return castraDir(st) + "/host_key" }
+func castraDir(st workspace.State) string     { return st.RemoteHome + "/.castra" }
+func serverPath(st workspace.State) string    { return castraDir(st) + "/bin/castra" }
+func hostKeyPath(st workspace.State) string   { return castraDir(st) + "/host_key" }
+func remoteEnvPath(st workspace.State) string { return castraDir(st) + "/remote-env.json" }
+
+// writeRemoteEnv stores devcontainer.json's resolved remoteEnv where the
+// server reads it for every session. It is rewritten on each `up`, so an
+// edited remoteEnv applies after the next `castra up`.
+func writeRemoteEnv(ctx context.Context, eng engine.Engine, st workspace.State, env map[string]*string) error {
+	if env == nil {
+		env = map[string]*string{}
+	}
+	data, err := json.Marshal(env)
+	if err != nil {
+		return err
+	}
+	q := shellescape.Quote
+	path := remoteEnvPath(st)
+	script := fmt.Sprintf("set -e; mkdir -p %s; cat > %s; mv -f %s %s", q(castraDir(st)), q(path+".new"), q(path+".new"), q(path))
+	_, err = eng.Exec(ctx, st.RemoteUser, st.ContainerID, bytes.NewReader(data), "sh", "-c", script)
+	return err
+}
 
 // installServer streams castra's own binary into the container once per
 // build of castra; the container's copy runs `castra server` for each session.

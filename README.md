@@ -92,6 +92,8 @@ On the first `up` of each new container, castra clones it to `~/dotfiles` inside
 - **Your agent** is forwarded per session. Inside a session, `SSH_AUTH_SOCK` points at a socket that exists only while the session does. Your host's socket is never mounted into the container.
 - **Host keys** are pinned. Each container gets its own host key, and OpenSSH checks it strictly. A recreated container gets a new key, and castra updates the pin.
 
+- **The environment** inside a session is the container's own, plus devcontainer.json's `remoteEnv`, plus `REMOTE_CONTAINERS=true`, `CASTRA=true` and `CASTRA_WORKSPACE=<name>`. `REMOTE_CONTAINERS` is what VS Code and DevPod set, and many dotfiles check it to know they run in a devcontainer, for example to leave `SSH_AUTH_SOCK` alone. Lifecycle commands get the same three variables.
+
 castra keeps its files in `~/.ssh/castra/` (its SSH config, client key and pinned host keys), `~/.local/state/castra/` (one record per workspace) and `~/.config/castra/config.yaml`. The only change it makes outside those is one `Include` line at the top of `~/.ssh/config`.
 
 ## Rootless Podman on a machine you reach over SSH

@@ -25,6 +25,11 @@ type Options struct {
 	AuthorizedKey []byte
 	// Workdir is where sessions start. Falls back to the user's home.
 	Workdir string
+	// Workspace is the workspace name, exported to sessions as CASTRA_WORKSPACE.
+	Workspace string
+	// RemoteEnv is devcontainer.json's resolved remoteEnv, applied on top of
+	// the container's environment; a nil value unsets the variable.
+	RemoteEnv map[string]*string
 	// Log receives diagnostics. Never stdout: stdout is the SSH stream.
 	Log *slog.Logger
 }
@@ -65,7 +70,7 @@ func Serve(conn net.Conn, opts Options) error {
 			log.Warn("accept channel", "err", err)
 			continue
 		}
-		s := &session{conn: sconn, ch: ch, workdir: opts.Workdir, log: log, gone: gone}
+		s := &session{conn: sconn, ch: ch, workdir: opts.Workdir, workspace: opts.Workspace, remoteEnv: opts.RemoteEnv, log: log, gone: gone}
 		wg.Add(1)
 		go func() {
 			defer wg.Done()
