@@ -84,7 +84,8 @@ func TestExecOutputAndExitStatus(t *testing.T) {
 	if !errors.As(err, &exitErr) || exitErr.ExitStatus() != 3 {
 		t.Fatalf("want exit status 3, got %v", err)
 	}
-	if want := h.workdir + "\nhi\n"; string(out) != want {
+	workdir, _ := filepath.EvalSymlinks(h.workdir) // macOS temp dirs sit behind /private
+	if want := workdir + "\nhi\n"; string(out) != want {
 		t.Fatalf("output %q, want %q", out, want)
 	}
 }
@@ -124,7 +125,8 @@ func TestPTY(t *testing.T) {
 		t.Fatal(err)
 	}
 	got := strings.ReplaceAll(string(out), "\r", "")
-	if !strings.HasPrefix(got, "/dev/pts/") || !strings.Contains(got, "40 120\n") || !strings.Contains(got, "xterm-256color") {
+	isTTY := strings.HasPrefix(got, "/dev/pts/") || strings.HasPrefix(got, "/dev/ttys") // Linux, macOS
+	if !isTTY || !strings.Contains(got, "40 120\n") || !strings.Contains(got, "xterm-256color") {
 		t.Fatalf("pty session printed %q", got)
 	}
 }
