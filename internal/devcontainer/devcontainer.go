@@ -187,48 +187,65 @@ func Up(ctx context.Context, opts UpOptions) (Result, error) {
 		return Result{}, fmt.Errorf("start devcontainer CLI: %w", err)
 	}
 
+	// stdout is read to the end before cmd.Wait runs: Wait closes the pipe,
+	// and calling it early can drop the result line of a CLI that exits fast
+	// (seen in CI, about 1 run in 300 under load).
 	results := make(chan Result, 1)
+	readDone := make(chan struct{})
 	go func() {
+		defer close(readDone)
 		sc := bufio.NewScanner(stdout)
 		sc.Buffer(make([]byte, 64*1024), 16*1024*1024)
+		found := false
 		for sc.Scan() {
 			var r Result
 			line := strings.TrimSpace(sc.Text())
-			if strings.HasPrefix(line, "{") && json.Unmarshal([]byte(line), &r) == nil && r.Outcome != "" {
+			if !found && strings.HasPrefix(line, "{") && json.Unmarshal([]byte(line), &r) == nil && r.Outcome != "" {
 				results <- r
-				return
+				found = true
+				continue
 			}
 			if opts.Stderr != nil && line != "" {
 				fmt.Fprintln(opts.Stderr, line)
 			}
 		}
-		close(results)
 	}()
-	exited := make(chan error, 1)
-	go func() { exited <- cmd.Wait() }()
 
 	var res Result
 	var gotResult bool
 	select {
-	case r, ok := <-results:
-		res, gotResult = r, ok
+	case res = <-results:
+		gotResult = true
+	case <-readDone: // stdout ended without a result
+		select {
+		case res = <-results: // the result was the last line
+			gotResult = true
+		default:
+		}
 	case <-ctx.Done():
 		_ = cmd.Process.Kill()
+		<-readDone
+		_ = cmd.Wait()
 		return Result{}, ctx.Err()
 	}
 	if !gotResult {
-		err := <-exited
+		<-readDone
+		err := cmd.Wait()
 		return Result{}, fmt.Errorf("devcontainer up printed no result: %v", err)
 	}
 
+	// The result is in. Give the CLI time to exit (stdout closes when it does),
+	// then stop waiting: on Podman it can hang here (devcontainers/cli #1236).
 	select {
-	case <-exited:
+	case <-readDone:
 	case <-time.After(grace):
 		_ = cmd.Process.Kill()
+		<-readDone
 		if opts.Stderr != nil {
 			fmt.Fprintf(opts.Stderr, "castra: the devcontainer CLI printed its result but did not exit within %s; continuing\n", grace)
 		}
 	}
+	_ = cmd.Wait()
 	if res.Outcome != "success" {
 		return res, fmt.Errorf("devcontainer up failed: %s %s", res.Message, res.Description)
 	}
