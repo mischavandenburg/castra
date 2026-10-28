@@ -113,6 +113,22 @@ func (p Paths) PinHostKey(alias string, key ssh.PublicKey) error {
 	return writeAtomic(p.KnownHosts, []byte(strings.Join(lines, "\n")+"\n"), 0o600)
 }
 
+// UnpinHostKey removes alias's pinned host key.
+func (p Paths) UnpinHostKey(alias string) error {
+	lines, err := p.otherHostLines(alias)
+	if err != nil {
+		return err
+	}
+	data := ""
+	if len(lines) > 0 {
+		data = strings.Join(lines, "\n") + "\n"
+	}
+	if _, err := os.Stat(p.KnownHosts); errors.Is(err, os.ErrNotExist) {
+		return nil
+	}
+	return writeAtomic(p.KnownHosts, []byte(data), 0o600)
+}
+
 // HasHostKey reports whether a host key is pinned for alias.
 func (p Paths) HasHostKey(alias string) bool {
 	b, err := os.ReadFile(p.KnownHosts)

@@ -20,16 +20,29 @@ import (
 
 func newSSHCmd() *cobra.Command {
 	return &cobra.Command{
-		Use:   "ssh <workspace> [-- command...]",
+		Use:   "ssh [workspace] [-- command...]",
 		Short: "Open a shell in a workspace, or run a command there, with your agent forwarded",
-		Args:  cobra.MinimumNArgs(1),
+		Long: `Open a shell in a workspace, or run a command there, with your agent forwarded.
+Without a workspace name, castra shows a menu (or uses the only workspace there is).`,
+		Args: cobra.ArbitraryArgs,
 		RunE: func(cmd *cobra.Command, args []string) error {
-			name := args[0]
-			command := args[1:]
-			if dash := cmd.ArgsLenAtDash(); dash > 1 {
-				return errors.New("usage: castra ssh <workspace> [-- command...]")
+			var name string
+			var command []string
+			switch dash := cmd.ArgsLenAtDash(); {
+			case dash > 1:
+				return errors.New("usage: castra ssh [workspace] [-- command...]")
+			case dash == 0:
+				command = args
+			case len(args) > 0:
+				name, command = args[0], args[1:]
 			}
-			st, err := workspace.Load(name)
+			var st workspace.State
+			var err error
+			if name == "" {
+				st, err = chooseWorkspace(cmd, "Which workspace? (arrows or j/k, Enter, q to quit)", true)
+			} else {
+				st, err = workspace.Load(name)
+			}
 			if err != nil {
 				return err
 			}

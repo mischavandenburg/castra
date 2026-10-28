@@ -36,6 +36,12 @@ castra ssh my-project    # open a shell inside it
 
 The workspace is named after the folder (`my-project`), and inside the container your code is at `/workspaces/my-project`.
 
+Leave out the name and castra shows a menu of your workspaces (arrow keys or j/k, Enter, a number to jump, q to quit). With only one workspace it goes straight in.
+
+```console
+castra ssh
+```
+
 Run a single command instead of a shell:
 
 ```console
@@ -52,6 +58,12 @@ Rebuild from scratch after you change the Dockerfile or devcontainer.json:
 
 ```console
 castra up my-project --recreate
+```
+
+Delete a workspace when you are done with it. castra asks first (`-y` skips the question), then removes the container, its SSH host entry and pinned host key. Your folder, the images and any named volumes stay. Without a name it shows the menu.
+
+```console
+castra delete my-project
 ```
 
 castra also adds a host to your SSH config, so anything that speaks SSH works too:

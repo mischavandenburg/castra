@@ -66,6 +66,23 @@ func (e Engine) Status(ctx context.Context, id string) string {
 	return strings.TrimSpace(string(out))
 }
 
+// Remove stops the container (giving it ten seconds) and removes it. A
+// container that no longer exists is not an error. Images and named volumes
+// are left alone.
+func (e Engine) Remove(ctx context.Context, id string) error {
+	if e.Status(ctx, id) == "missing" {
+		return nil
+	}
+	_ = exec.CommandContext(ctx, e.Path, "stop", "-t", "10", id).Run()
+	var stderr bytes.Buffer
+	cmd := exec.CommandContext(ctx, e.Path, "rm", id)
+	cmd.Stderr = &stderr
+	if err := cmd.Run(); err != nil {
+		return fmt.Errorf("%s rm %s: %v: %s", e.Name, short(id), err, strings.TrimSpace(stderr.String()))
+	}
+	return nil
+}
+
 // ExecArgs is the argv that runs args inside the container as user, with
 // stdin attached and no terminal.
 func (e Engine) ExecArgs(user, id string, args ...string) []string {

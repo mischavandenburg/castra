@@ -73,6 +73,26 @@ func TestPinHostKeyReplacesOldKey(t *testing.T) {
 	}
 }
 
+func TestUnpinHostKeyKeepsOthers(t *testing.T) {
+	p := testPaths(t)
+	_, a, _ := NewKey("a")
+	_, b, _ := NewKey("b")
+	_ = p.PinHostKey("gone.castra", a)
+	_ = p.PinHostKey("kept.castra", b)
+	if err := p.UnpinHostKey("gone.castra"); err != nil {
+		t.Fatal(err)
+	}
+	if p.HasHostKey("gone.castra") || !p.HasHostKey("kept.castra") {
+		t.Fatal("unpin removed the wrong line")
+	}
+	if err := p.UnpinHostKey("kept.castra"); err != nil {
+		t.Fatal(err)
+	}
+	if b, _ := os.ReadFile(p.KnownHosts); len(b) != 0 {
+		t.Fatalf("known_hosts should be empty, has %q", b)
+	}
+}
+
 func TestEnsureIncludeOnceAndKeepsUserConfig(t *testing.T) {
 	p := testPaths(t)
 	if err := os.MkdirAll(p.SSHDir, 0o700); err != nil {

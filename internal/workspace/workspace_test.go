@@ -38,4 +38,13 @@ func TestSaveLoadAll(t *testing.T) {
 	if err != nil || len(all) != 2 || all[0].Name != "alpha" || all[1].ContainerID != "id-zeta" {
 		t.Fatalf("All() = %+v, %v", all, err)
 	}
+	if err := Delete("alpha"); err != nil {
+		t.Fatal(err)
+	}
+	if err := Delete("alpha"); err != nil {
+		t.Fatalf("deleting twice: %v", err)
+	}
+	if all, _ := All(); len(all) != 1 || all[0].Name != "zeta" {
+		t.Fatalf("after delete: %+v", all)
+	}
 }

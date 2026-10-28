@@ -122,6 +122,21 @@ func Save(s State) error {
 	return os.Rename(tmp, p)
 }
 
+// Delete removes the record of one workspace and its lock file.
+func Delete(name string) error {
+	p, err := recordPath(name)
+	if err != nil {
+		return err
+	}
+	if err := os.Remove(p); err != nil && !errors.Is(err, os.ErrNotExist) {
+		return err
+	}
+	if lock, err := LockPath(name); err == nil {
+		_ = os.Remove(lock)
+	}
+	return nil
+}
+
 // All reads every workspace record, sorted by name.
 func All() ([]State, error) {
 	dir, err := StateDir()
