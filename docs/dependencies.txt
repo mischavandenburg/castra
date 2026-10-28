@@ -1,0 +1,10 @@
+# Direct Go dependencies. CI fails when go.mod differs from this list.
+# Each one is checked for maintenance and advisories before it is added.
+al.essio.dev/pkg/shellescape
+github.com/creack/pty
+github.com/gofrs/flock
+github.com/pkg/sftp
+github.com/spf13/cobra
+golang.org/x/crypto
+golang.org/x/term
+sigs.k8s.io/yaml

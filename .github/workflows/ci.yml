@@ -1,0 +1,66 @@
+name: ci
+
+on:
+  push:
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  test:
+    strategy:
+      matrix:
+        os: [ubuntu-latest, macos-latest]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        with:
+          go-version-file: go.mod
+      - run: go vet ./...
+      - run: go test -race ./...
+      - name: The Linux binary is static
+        if: runner.os == 'Linux'
+        run: |
+          CGO_ENABLED=0 go build -trimpath -o dist/castra .
+          ldd dist/castra 2>&1 | grep -q 'not a dynamic executable'
+
+  vulnerabilities:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        with:
+          go-version-file: go.mod
+      - run: go run golang.org/x/vuln/cmd/govulncheck@v1.9.0 ./...
+
+  dependencies:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        with:
+          go-version-file: go.mod
+      - name: Direct dependencies match docs/dependencies.txt
+        run: |
+          diff <(go list -m -f '{{if not (or .Indirect .Main)}}{{.Path}}{{end}}' all | sed '/^$/d' | sort) \
+               <(grep -v '^#' docs/dependencies.txt | sed '/^$/d' | sort)
+
+  leaks:
+    # Fork pull requests get no secrets, so they skip this job.
+    if: github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository
+    runs-on: ubuntu-latest
+    env:
+      LEAK_PATTERNS: ${{ secrets.LEAK_PATTERNS }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - run: bash scripts/leak-check.sh .
+      - name: The leak check fails on a planted match
+        run: |
+          d=$(mktemp -d)
+          echo "castra-leak-canary-42" > "$d/planted"
+          if LEAK_PATTERNS='castra-leak-canary-[0-9]+' bash scripts/leak-check.sh "$d"; then
+            echo "leak-check passed a tree with a planted match" >&2
+            exit 1
+          fi
