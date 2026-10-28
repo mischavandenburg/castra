@@ -5,16 +5,15 @@ import (
 	"errors"
 	"fmt"
 	"os"
-	"os/exec"
 	"strings"
 	"syscall"
 
-	"al.essio.dev/pkg/shellescape"
 	"github.com/spf13/cobra"
 	"golang.org/x/term"
 
 	"github.com/mischavandenburg/castra/internal/engine"
 	"github.com/mischavandenburg/castra/internal/server"
+	"github.com/mischavandenburg/castra/internal/shell"
 	"github.com/mischavandenburg/castra/internal/sshconfig"
 	"github.com/mischavandenburg/castra/internal/workspace"
 )
@@ -63,9 +62,9 @@ Without a workspace name, castra shows a menu (or uses the only workspace there 
 			if err != nil {
 				return err
 			}
-			sshPath, err := exec.LookPath("ssh")
+			sshPath, err := sshPath()
 			if err != nil {
-				return fmt.Errorf("ssh not found on PATH: %w", err)
+				return err
 			}
 			argv := []string{"ssh", "-F", paths.Config}
 			if len(command) > 0 && term.IsTerminal(int(os.Stdin.Fd())) {
@@ -73,7 +72,7 @@ Without a workspace name, castra shows a menu (or uses the only workspace there 
 			}
 			argv = append(argv, st.Alias())
 			if len(command) > 0 {
-				argv = append(argv, shellescape.QuoteCommand(command))
+				argv = append(argv, shell.Join(command))
 			}
 			return syscall.Exec(sshPath, argv, os.Environ())
 		},

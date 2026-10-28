@@ -8,7 +8,6 @@ import (
 
 	"github.com/spf13/cobra"
 
-	"github.com/mischavandenburg/castra/internal/engine"
 	"github.com/mischavandenburg/castra/internal/pick"
 	"github.com/mischavandenburg/castra/internal/workspace"
 )
@@ -32,13 +31,10 @@ func chooseWorkspace(cmd *cobra.Command, title string, autoSingle bool) (workspa
 	for _, st := range states {
 		width = max(width, len(st.Name))
 	}
+	status := containerStates(cmd.Context(), states)
 	items := make([]string, len(states))
 	for i, st := range states {
-		status := "unknown"
-		if eng, err := engine.Detect(st.Engine); err == nil {
-			status = eng.Status(cmd.Context(), st.ContainerID)
-		}
-		items[i] = fmt.Sprintf("%-*s  %-8s  %s", width, st.Name, status, st.Folder)
+		items[i] = fmt.Sprintf("%-*s  %-8s  %s", width, st.Name, status[st.Name], st.Folder)
 	}
 	i, err := pick.Pick(os.Stdin, cmd.ErrOrStderr(), title, items)
 	if errors.Is(err, pick.ErrCanceled) {

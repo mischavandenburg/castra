@@ -129,6 +129,26 @@ func TestFindCLIChecks(t *testing.T) {
 	}
 }
 
+// TestUpIsCancelled: a cancelled context ends the CLI and its process group
+// (a build in progress) and reports the cancellation, so Ctrl-C during a
+// long build does not leave work running.
+func TestUpIsCancelled(t *testing.T) {
+	cli := fakeCLI(t, `sleep 60; echo '{"outcome":"success","containerId":"abc","remoteUser":"dev"}'`)
+	ctx, cancel := context.WithCancel(context.Background())
+	go func() {
+		time.Sleep(300 * time.Millisecond)
+		cancel()
+	}()
+	startedAt := time.Now()
+	_, err := Up(ctx, UpOptions{CLI: cli, EnginePath: "podman", Folder: "/x", Name: "demo", Stderr: io.Discard})
+	if err != context.Canceled {
+		t.Fatalf("want context.Canceled, got %v", err)
+	}
+	if took := time.Since(startedAt); took > 8*time.Second {
+		t.Fatalf("Up took %s to stop after the cancellation", took)
+	}
+}
+
 func TestUpWithoutResultFails(t *testing.T) {
 	cli := fakeCLI(t, `echo "not json"; exit 2`)
 	if _, err := Up(context.Background(), UpOptions{CLI: cli, EnginePath: "podman", Folder: "/x", Name: "demo", Stderr: io.Discard}); err == nil {

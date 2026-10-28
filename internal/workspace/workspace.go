@@ -11,10 +11,21 @@ import (
 	"regexp"
 	"sort"
 	"strings"
+
+	"github.com/mischavandenburg/castra/internal/atomic"
+	"github.com/mischavandenburg/castra/internal/lock"
 )
 
 // Label marks every container castra manages; its value is the workspace name.
 const Label = "castra.workspace"
+
+// MarkerEnv is what tells dotfiles and scripts they run in a devcontainer:
+// REMOTE_CONTAINERS is the VS Code and DevPod convention (DevPod also sets
+// DEVPOD and DEVPOD_WORKSPACE_ID, which CASTRA and CASTRA_WORKSPACE mirror).
+// Lifecycle commands and every SSH session get these.
+func MarkerEnv(name string) []string {
+	return []string{"REMOTE_CONTAINERS=true", "CASTRA=true", "CASTRA_WORKSPACE=" + name}
+}
 
 // State is the record castra keeps per workspace.
 type State struct {
@@ -67,16 +78,18 @@ func recordPath(name string) (string, error) {
 	return filepath.Join(dir, "workspaces", name+".json"), nil
 }
 
-// LockPath is the lock file that serializes `up` runs on one workspace.
-func LockPath(name string) (string, error) {
+// Lock serializes `up` and `delete` on one workspace. Lock files are never
+// removed: a run waiting on an unlinked file would get a lock nobody else can
+// see, so they stay in the state directory, empty.
+func Lock(name string) (*lock.Lock, error) {
 	dir, err := StateDir()
 	if err != nil {
-		return "", err
+		return nil, err
 	}
 	if err := os.MkdirAll(dir, 0o700); err != nil {
-		return "", err
+		return nil, err
 	}
-	return filepath.Join(dir, name+".lock"), nil
+	return lock.Acquire(filepath.Join(dir, name+".lock"))
 }
 
 // ErrNotFound means castra has no record of the workspace.
@@ -115,14 +128,10 @@ func Save(s State) error {
 	if err != nil {
 		return err
 	}
-	tmp := p + ".tmp"
-	if err := os.WriteFile(tmp, append(b, '\n'), 0o600); err != nil {
-		return err
-	}
-	return os.Rename(tmp, p)
+	return atomic.WriteFile(p, append(b, '\n'), 0o600)
 }
 
-// Delete removes the record of one workspace and its lock file.
+// Delete removes the record of one workspace.
 func Delete(name string) error {
 	p, err := recordPath(name)
 	if err != nil {
@@ -130,9 +139,6 @@ func Delete(name string) error {
 	}
 	if err := os.Remove(p); err != nil && !errors.Is(err, os.ErrNotExist) {
 		return err
-	}
-	if lock, err := LockPath(name); err == nil {
-		_ = os.Remove(lock)
 	}
 	return nil
 }

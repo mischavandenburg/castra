@@ -1,0 +1,201 @@
+#!/usr/bin/env bash
+# End-to-end test of castra against test/fixtures/e2e on one container engine.
+#
+#   test/e2e/run --engine podman|docker [--keep]
+#
+# Needs: castra (or $CASTRA), the engine, ssh, ssh-agent, ssh-keygen, scp,
+# git, and the devcontainer CLI. It starts its own ssh-agent with a throwaway
+# key, so your agent is never used, and it deletes the workspace it made
+# unless --keep is given. It touches your real castra files the way any
+# `castra up` does: a workspace record, a Host file and a pinned host key,
+# all removed again by `castra delete` at the end.
+set -uo pipefail
+
+usage() { echo "usage: $0 --engine podman|docker [--keep]" >&2; exit 2; }
+engine="" keep=0
+while [ $# -gt 0 ]; do
+  case "$1" in
+    --engine) engine="$2"; shift 2 ;;
+    --keep) keep=1; shift ;;
+    *) usage ;;
+  esac
+done
+case "$engine" in podman|docker) ;; *) usage ;; esac
+
+CASTRA="${CASTRA:-castra}"
+here="$(cd "$(dirname "$0")/../.." && pwd)"
+name="castra-e2e-$engine"
+tmp="$(mktemp -d)"
+dir="$tmp/$name"
+castra_dir="$HOME/.ssh/castra"
+failures=0
+
+pass() { echo "PASS  $*"; }
+fail() { echo "FAIL  $*" >&2; failures=$((failures + 1)); }
+check() { # check <description> <command...>: PASS when the command exits 0
+  local what="$1"; shift
+  if "$@"; then pass "$what"; else fail "$what"; fi
+}
+refute() { # refute <description> <command...>: PASS when the command fails
+  local what="$1"; shift
+  if "$@" >/dev/null 2>&1; then fail "$what"; else pass "$what"; fi
+}
+expect() { # expect <description> <want> <got>
+  if [ "$2" = "$3" ]; then pass "$1 ($3)"; else fail "$1: want $2, got $3"; fi
+}
+in_ws() { "$CASTRA" ssh "$name" -- "$@" </dev/null 2>/dev/null; }
+count() { cat -- "$2" 2>/dev/null | grep -c -- "$1"; } # matching lines; 0 for a missing file
+ctr_id() { "$engine" ps -a --filter "label=castra.workspace=$name" --format '{{.ID}}'; }
+ctr_count() { ctr_id | grep -c .; }
+
+cleanup() {
+  if [ "$keep" = 0 ]; then
+    "$CASTRA" delete "$name" -y </dev/null >/dev/null 2>&1 || true
+    rm -rf "$tmp"
+  else
+    echo "kept: workspace $name, files in $tmp"
+  fi
+  [ -n "${SSH_AGENT_PID:-}" ] && kill "$SSH_AGENT_PID" 2>/dev/null
+}
+trap cleanup EXIT
+
+echo "castra e2e on $engine ($("$engine" --version | head -1)); castra $("$CASTRA" version)"
+
+# The fixture, copied so the workspace is named after this run. Docker refuses
+# the Podman-only z mount option.
+cp -r "$here/test/fixtures/e2e" "$dir"
+if [ "$engine" = docker ]; then
+  sed -i.bak 's/,z"/"/' "$dir/.devcontainer/devcontainer.json" && rm -f "$dir/.devcontainer/devcontainer.json.bak"
+fi
+
+# A dotfiles remote the container reaches through the fixture's bind mount.
+# Its installer records whether the forwarded agent was visible while it ran.
+work="$tmp/dotfiles-work"
+mkdir -p "$work"
+cat > "$work/install" <<'EOF'
+#!/bin/sh
+date +%s%N > "$HOME/dotfiles/.installed"
+ssh-add -l > "$HOME/dotfiles/.agent-keys" 2>&1 || true
+EOF
+chmod +x "$work/install"
+git -C "$work" init -q -b main
+git -C "$work" -c user.name=castra -c user.email=castra@example.invalid add . >/dev/null
+git -C "$work" -c user.name=castra -c user.email=castra@example.invalid commit -q -m dotfiles
+git clone -q --bare "$work" "$dir/mounted/dotfiles.git"
+
+# A throwaway agent with one key, so forwarding is provable and nothing of
+# yours is involved.
+eval "$(ssh-agent -s)" >/dev/null
+ssh-keygen -q -t ed25519 -N '' -C castra-e2e-key -f "$tmp/key"
+ssh-add -q "$tmp/key"
+export SSH_AUTH_SOCK
+
+# up
+t0=$(date +%s)
+check "castra up" "$CASTRA" up "$dir" --engine "$engine" --dotfiles /mnt/fixture/dotfiles.git </dev/null
+echo "      (first up took $(( $(date +%s) - t0 )) s)"
+ctr="$(ctr_id)"
+expect "one container carries the label" 1 "$(ctr_count)"
+expect "container is running" true "$("$engine" inspect --format '{{.State.Running}}' "$ctr")"
+
+# ls
+ls_json="$("$CASTRA" ls --json)"
+check "ls --json names the workspace" grep -q "\"name\": \"$name\"" <<<"$ls_json"
+for k in name state id folder; do
+  check "ls --json has $k" grep -q "\"$k\":" <<<"$ls_json"
+done
+check "ls --json state is running" grep -q '"state": "running"' <<<"$ls_json"
+
+# ssh: where, who, and the environment of command and login sessions
+expect "pwd is the workspace" "/workspaces/$name" "$(in_ws pwd)"
+expect "remote user" vscode "$(in_ws id -un)"
+expect "uid matches the host" "$(id -u)" "$(in_ws id -u)"
+expect "markers in a command session" "true true $name" "$(in_ws sh -c 'printf "%s %s %s" "$REMOTE_CONTAINERS" "$CASTRA" "$CASTRA_WORKSPACE"')"
+expect "remoteEnv in a command session" "yes /opt/fixture/bin" "$(in_ws sh -c 'printf "%s %s" "$CASTRA_FIXTURE_REMOTE" "${PATH##*:}"')"
+expect "containerEnv reaches sessions" yes "$(in_ws sh -c 'printf %s "$CASTRA_FIXTURE"')"
+login="$(printf 'printf "LOGIN %%s %%s %%s\\n" "$REMOTE_CONTAINERS" "$CASTRA_FIXTURE_REMOTE" "${PATH##*:}"\nexit\n' | "$CASTRA" ssh "$name" 2>/dev/null | tr -d '\r' | grep '^LOGIN ')"
+expect "markers and remoteEnv in a login shell" "LOGIN true yes /opt/fixture/bin" "$login"
+in_ws sh -c 'exit 3'; expect "exit code passes through" 3 "$?"
+
+# the agent, per session
+agent_out="$(in_ws sh -c 'ssh-add -l 2>&1 | grep -c castra-e2e-key; echo "$SSH_AUTH_SOCK"')"
+expect "the throwaway key is listed inside" 1 "$(sed -n 1p <<<"$agent_out")"
+sock="$(sed -n 2p <<<"$agent_out")"
+check "SSH_AUTH_SOCK is a per-session path under /tmp" grep -q '^/tmp/castra-agent-' <<<"$sock"
+check "the session socket is gone afterwards" "$engine" exec "$ctr" test ! -e "$sock"
+expect "the host agent socket is not mounted" 0 "$("$engine" inspect --format '{{range .Mounts}}{{.Source}}{{"\n"}}{{end}}' "$ctr" | grep -ciE 'auth-agent|ssh_auth|ssh-agent')"
+if command -v ss >/dev/null; then
+  "$CASTRA" ssh "$name" -- sleep 4 </dev/null >/dev/null 2>&1 &
+  sleep 2
+  expect "nothing of castra listens on TCP during a session" 0 "$(ss -lntp 2>/dev/null | grep -c castra)"
+  wait $! 2>/dev/null
+fi
+
+# plain OpenSSH, scp both ways, and the files castra wrote for this workspace
+check "plain ssh through the Include" ssh "$name.castra" true </dev/null
+echo "e2e $(date +%s)" > "$tmp/note.txt"
+check "scp into the workspace" scp -q "$tmp/note.txt" "$name.castra:/workspaces/$name/note-in.txt" </dev/null
+check "scp back out" scp -q "$name.castra:/workspaces/$name/note-in.txt" "$tmp/note-back.txt" </dev/null
+check "the copy is byte-identical" cmp -s "$tmp/note.txt" "$tmp/note-back.txt"
+expect "one pinned host key line" 1 "$(count "^$name.castra " "$castra_dir/known_hosts.d/$name")"
+expect "the Host block pins strictly" 1 "$(count 'StrictHostKeyChecking yes' "$castra_dir/hosts/$name.conf")"
+expect "the Host block allows no password prompt" 1 "$(count 'PasswordAuthentication no' "$castra_dir/hosts/$name.conf")"
+expect "the Host block forwards only the agent" 1 "$(count 'ClearAllForwardings yes' "$castra_dir/hosts/$name.conf")"
+
+# the fixture's config: mount, lifecycle hooks, ownership
+check "bind mount is readable inside" in_ws test -r /mnt/fixture/hello
+check "postCreateCommand ran" in_ws test -f /tmp/castra-created
+check "postStartCommand ran" in_ws test -f /tmp/castra-started
+created="$(in_ws cat /tmp/castra-created)"
+in_ws touch "/workspaces/$name/owned"
+if [ "$(uname)" = Linux ]; then
+  expect "a file made inside is owned by the host user" "$(id -u)" "$(stat -c %u "$dir/owned")"
+fi
+
+# dotfiles over the bind-mounted remote, with the agent visible to the installer
+check "dotfiles cloned" in_ws test -d /home/vscode/dotfiles/.git
+check "dotfiles installer ran" in_ws test -f /home/vscode/dotfiles/.installed
+expect "the agent was forwarded during the install step" 1 "$(in_ws sh -c 'grep -c castra-e2e-key ~/dotfiles/.agent-keys')"
+installed="$(in_ws cat /home/vscode/dotfiles/.installed)"
+
+# a second up is idempotent and skips the dotfiles
+t0=$(date +%s)
+out="$("$CASTRA" up "$dir" --engine "$engine" --dotfiles /mnt/fixture/dotfiles.git </dev/null 2>&1)"; rc=$?
+took=$(( $(date +%s) - t0 ))
+expect "second up exits 0" 0 "$rc"
+expect "second up keeps the container" "$ctr" "$(ctr_id)"
+check "second up skips the dotfiles" grep -q "dotfiles already in" <<<"$out"
+expect "dotfiles installer did not rerun" "$installed" "$(in_ws cat /home/vscode/dotfiles/.installed)"
+check "second up took under 15 s ($took s)" test "$took" -lt 15
+other=docker; [ "$engine" = docker ] && other=podman
+refute "switching engines is refused" "$CASTRA" up "$dir" --engine "$other" </dev/null
+
+# recreate: a new container, create hooks rerun, the pin rotated
+check "castra up --recreate" "$CASTRA" up "$dir" --engine "$engine" --dotfiles /mnt/fixture/dotfiles.git --recreate </dev/null
+new="$(ctr_id)"
+check "recreate changed the container id" test "$new" != "$ctr" -a -n "$new"
+expect "still one container" 1 "$(ctr_count)"
+check "postCreateCommand ran again" test "$(in_ws cat /tmp/castra-created)" != "$created"
+check "dotfiles installed in the new container" in_ws test -f /home/vscode/dotfiles/.installed
+expect "still one pinned host key line" 1 "$(count "^$name.castra " "$castra_dir/known_hosts.d/$name")"
+check "plain ssh works against the new pin" ssh "$name.castra" true </dev/null
+
+# delete: container and records gone, images, volumes and the folder kept
+images_before="$("$engine" images -q | sort -u | wc -l)"
+volumes_before="$("$engine" volume ls -q | wc -l)"
+check "castra delete -y" "$CASTRA" delete "$name" -y </dev/null
+expect "no container left" 0 "$(ctr_count)"
+check "no pinned host key left" test ! -e "$castra_dir/known_hosts.d/$name"
+check "no Host file left" test ! -e "$castra_dir/hosts/$name.conf"
+check "the folder is untouched" test -f "$dir/.devcontainer/devcontainer.json" -a -f "$dir/owned"
+expect "images untouched" "$images_before" "$("$engine" images -q | sort -u | wc -l)"
+expect "volumes untouched" "$volumes_before" "$("$engine" volume ls -q | wc -l)"
+refute "ls no longer lists it" grep -q "^$name " <<<"$("$CASTRA" ls)"
+
+echo
+if [ "$failures" = 0 ]; then
+  echo "castra e2e on $engine: all checks passed"
+else
+  echo "castra e2e on $engine: $failures check(s) failed" >&2
+  exit 1
+fi

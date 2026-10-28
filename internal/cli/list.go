@@ -31,13 +31,10 @@ func newListCmd() *cobra.Command {
 			if err != nil {
 				return err
 			}
+			status := containerStates(cmd.Context(), states)
 			entries := make([]listEntry, 0, len(states))
 			for _, st := range states {
-				status := "unknown"
-				if eng, err := engine.Detect(st.Engine); err == nil {
-					status = eng.Status(cmd.Context(), st.ContainerID)
-				}
-				entries = append(entries, listEntry{Name: st.Name, State: status, ID: shortID(st.ContainerID), Folder: st.Folder})
+				entries = append(entries, listEntry{Name: st.Name, State: status[st.Name], ID: engine.ShortID(st.ContainerID), Folder: st.Folder})
 			}
 			if asJSON {
 				enc := json.NewEncoder(cmd.OutOrStdout())
@@ -62,11 +59,4 @@ func printList(w io.Writer, entries []listEntry) error {
 		fmt.Fprintf(tw, "%s\t%s\t%s\t%s\n", e.Name, e.State, e.ID, e.Folder)
 	}
 	return tw.Flush()
-}
-
-func shortID(id string) string {
-	if len(id) > 12 {
-		return id[:12]
-	}
-	return id
 }

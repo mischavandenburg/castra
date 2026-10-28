@@ -19,6 +19,8 @@ import (
 	"github.com/creack/pty"
 	"github.com/pkg/sftp"
 	"golang.org/x/crypto/ssh"
+
+	"github.com/mischavandenburg/castra/internal/workspace"
 )
 
 // session is one SSH session channel: a shell, a command, or the sftp
@@ -39,8 +41,9 @@ type session struct {
 	proc    *os.Process
 	started bool
 
-	agentDir string
-	agentLn  net.Listener
+	agentDir   string
+	agentLn    net.Listener
+	agentConns map[io.Closer]struct{} // open relays, closed with the session
 }
 
 type ptyRequest struct {
@@ -346,7 +349,7 @@ func (s *session) forwardAgent() error {
 		return err
 	}
 	_ = os.Chmod(sock, 0o600)
-	s.agentDir, s.agentLn = dir, ln
+	s.agentDir, s.agentLn, s.agentConns = dir, ln, map[io.Closer]struct{}{}
 
 	go func() {
 		for {
@@ -360,6 +363,10 @@ func (s *session) forwardAgent() error {
 	return nil
 }
 
+// relayAgent carries one connection to the session's agent socket over an
+// auth-agent channel to the client. Both ends are registered so cleanup can
+// close them: agent access ends with the session, not when the process
+// holding the connection feels like letting go.
 func (s *session) relayAgent(local net.Conn) {
 	defer local.Close()
 	remote, reqs, err := s.conn.OpenChannel("auth-agent@openssh.com", nil)
@@ -368,12 +375,36 @@ func (s *session) relayAgent(local net.Conn) {
 		return
 	}
 	defer remote.Close()
+	if !s.track(local, remote) {
+		return // the session ended first
+	}
+	defer s.untrack(local, remote)
 	go ssh.DiscardRequests(reqs)
 	go func() {
 		_, _ = io.Copy(remote, local)
 		_ = remote.CloseWrite()
 	}()
 	_, _ = io.Copy(local, remote)
+}
+
+func (s *session) track(conns ...io.Closer) bool {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.agentLn == nil {
+		return false
+	}
+	for _, c := range conns {
+		s.agentConns[c] = struct{}{}
+	}
+	return true
+}
+
+func (s *session) untrack(conns ...io.Closer) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	for _, c := range conns {
+		delete(s.agentConns, c)
+	}
 }
 
 func (s *session) agentSocket() string {
@@ -383,13 +414,18 @@ func (s *session) agentSocket() string {
 	return s.agentLn.Addr().String()
 }
 
+// cleanup ends the session's agent forwarding: the socket goes, and so does
+// every connection still relaying through it.
 func (s *session) cleanup() {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	if s.agentLn != nil {
 		_ = s.agentLn.Close()
+		for c := range s.agentConns {
+			_ = c.Close()
+		}
 		_ = os.RemoveAll(s.agentDir)
-		s.agentLn = nil
+		s.agentLn, s.agentConns = nil, nil
 	}
 }
 
@@ -422,10 +458,8 @@ func (s *session) environ(a account, req *ptyRequest) []string {
 	// The markers DevPod and VS Code set, which dotfiles test to tell they are
 	// in a devcontainer (a common one: leave SSH_AUTH_SOCK alone when
 	// REMOTE_CONTAINERS is set). Defaults: the container's own env wins.
-	set("REMOTE_CONTAINERS=true")
-	set("CASTRA=true")
-	if s.workspace != "" {
-		set("CASTRA_WORKSPACE=" + s.workspace)
+	for _, kv := range workspace.MarkerEnv(s.workspace) {
+		set(kv)
 	}
 	for _, kv := range os.Environ() {
 		set(kv)

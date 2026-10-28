@@ -7,7 +7,6 @@ import (
 	"os"
 	"strings"
 
-	"github.com/gofrs/flock"
 	"github.com/spf13/cobra"
 	"golang.org/x/term"
 
@@ -38,7 +37,7 @@ Your folder, the images and any named volumes stay. Without a name, castra shows
 			}
 			if !yes {
 				ok, err := confirm(cmd, fmt.Sprintf("Delete workspace %s? This removes container %s and everything in it that is not on a mount; the folder %s stays. [y/N] ",
-					st.Name, shortID(st.ContainerID), st.Folder))
+					st.Name, engine.ShortID(st.ContainerID), st.Folder))
 				if err != nil {
 					return err
 				}
@@ -69,15 +68,11 @@ func confirm(cmd *cobra.Command, question string) (bool, error) {
 }
 
 func deleteWorkspace(cmd *cobra.Command, st workspace.State) error {
-	lockPath, err := workspace.LockPath(st.Name)
+	held, err := workspace.Lock(st.Name)
 	if err != nil {
 		return err
 	}
-	lock := flock.New(lockPath)
-	if err := lock.Lock(); err != nil {
-		return fmt.Errorf("lock %s: %w", lockPath, err)
-	}
-	defer func() { _ = lock.Unlock() }()
+	defer func() { _ = held.Release() }()
 
 	eng, err := engine.Detect(st.Engine)
 	if err != nil {
@@ -90,15 +85,12 @@ func deleteWorkspace(cmd *cobra.Command, st workspace.State) error {
 	if err != nil {
 		return err
 	}
-	if err := paths.UnpinHostKey(st.Alias()); err != nil {
+	if err := paths.RemoveHost(st); err != nil {
 		return err
 	}
 	if err := workspace.Delete(st.Name); err != nil {
 		return err
 	}
-	if err := writeSSHConfig(paths); err != nil {
-		return err
-	}
-	fmt.Fprintf(cmd.ErrOrStderr(), "castra: deleted %s (container %s); %s is untouched\n", st.Name, shortID(st.ContainerID), st.Folder)
+	fmt.Fprintf(cmd.ErrOrStderr(), "castra: deleted %s (container %s); %s is untouched\n", st.Name, engine.ShortID(st.ContainerID), st.Folder)
 	return nil
 }

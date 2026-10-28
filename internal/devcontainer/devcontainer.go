@@ -13,6 +13,7 @@ import (
 	"os/exec"
 	"strconv"
 	"strings"
+	"syscall"
 	"time"
 
 	"github.com/mischavandenburg/castra/internal/workspace"
@@ -139,20 +140,13 @@ func (o UpOptions) Args() []string {
 	}
 	// The devcontainer markers castra's sessions get, for the lifecycle
 	// commands too (DevPod sets them on the container itself).
-	for _, kv := range MarkerEnv(o.Name) {
+	for _, kv := range workspace.MarkerEnv(o.Name) {
 		args = append(args, "--remote-env", kv)
 	}
 	if o.Recreate {
 		args = append(args, "--remove-existing-container")
 	}
 	return args
-}
-
-// MarkerEnv is what tells dotfiles and scripts they run in a devcontainer:
-// REMOTE_CONTAINERS is the VS Code and DevPod convention (DevPod also sets
-// DEVPOD and DEVPOD_WORKSPACE_ID, which CASTRA and CASTRA_WORKSPACE mirror).
-func MarkerEnv(name string) []string {
-	return []string{"REMOTE_CONTAINERS=true", "CASTRA=true", "CASTRA_WORKSPACE=" + name}
 }
 
 // Result is what `devcontainer up` prints on success.
@@ -179,6 +173,10 @@ func Up(ctx context.Context, opts UpOptions) (Result, error) {
 	}
 	cmd := exec.Command(opts.CLI, opts.Args()...)
 	cmd.Stderr = opts.Stderr
+	// Its own process group, so stopping it stops the engine commands it
+	// started too, and a Ctrl-C on the terminal reaches castra alone, which
+	// then ends the group in order.
+	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
 	stdout, err := cmd.StdoutPipe()
 	if err != nil {
 		return Result{}, err
@@ -187,13 +185,13 @@ func Up(ctx context.Context, opts UpOptions) (Result, error) {
 		return Result{}, fmt.Errorf("start devcontainer CLI: %w", err)
 	}
 
-	// stdout is read to the end before cmd.Wait runs: Wait closes the pipe,
-	// and calling it early can drop the result line of a CLI that exits fast
+	// results carries the one result line, then closes when stdout ends. It
+	// is read to the end before cmd.Wait runs: Wait closes the pipe, and
+	// calling it early can drop the result line of a CLI that exits fast
 	// (seen in CI, about 1 run in 300 under load).
 	results := make(chan Result, 1)
-	readDone := make(chan struct{})
 	go func() {
-		defer close(readDone)
+		defer close(results)
 		sc := bufio.NewScanner(stdout)
 		sc.Buffer(make([]byte, 64*1024), 16*1024*1024)
 		found := false
@@ -212,40 +210,30 @@ func Up(ctx context.Context, opts UpOptions) (Result, error) {
 	}()
 
 	var res Result
-	var gotResult bool
+	var ok bool
 	select {
-	case res = <-results:
-		gotResult = true
-	case <-readDone: // stdout ended without a result
-		select {
-		case res = <-results: // the result was the last line
-			gotResult = true
-		default:
-		}
+	case res, ok = <-results:
 	case <-ctx.Done():
-		_ = cmd.Process.Kill()
-		<-readDone
-		_ = cmd.Wait()
+		terminate(cmd, results)
 		return Result{}, ctx.Err()
 	}
-	if !gotResult {
-		<-readDone
-		err := cmd.Wait()
-		return Result{}, fmt.Errorf("devcontainer up printed no result: %v", err)
+	if !ok { // stdout ended without a result
+		return Result{}, fmt.Errorf("devcontainer up printed no result: %v", cmd.Wait())
 	}
 
 	// The result is in. Give the CLI time to exit (stdout closes when it does),
 	// then stop waiting: on Podman it can hang here (devcontainers/cli #1236).
 	select {
-	case <-readDone:
+	case <-results:
+		if err := cmd.Wait(); err != nil && res.Outcome == "success" && opts.Stderr != nil {
+			fmt.Fprintf(opts.Stderr, "castra: the devcontainer CLI reported success but then exited with %v; continuing\n", err)
+		}
 	case <-time.After(grace):
-		_ = cmd.Process.Kill()
-		<-readDone
+		terminate(cmd, results)
 		if opts.Stderr != nil {
 			fmt.Fprintf(opts.Stderr, "castra: the devcontainer CLI printed its result but did not exit within %s; continuing\n", grace)
 		}
 	}
-	_ = cmd.Wait()
 	if res.Outcome != "success" {
 		return res, fmt.Errorf("devcontainer up failed: %s %s", res.Message, res.Description)
 	}
@@ -253,4 +241,24 @@ func Up(ctx context.Context, opts UpOptions) (Result, error) {
 		return res, fmt.Errorf("devcontainer up result lacks containerId or remoteUser")
 	}
 	return res, nil
+}
+
+// terminate ends the CLI and everything it started: SIGTERM to the process
+// group, five seconds for it to exit, then SIGKILL. It reaps the process and
+// drains stdout, which ends the reader.
+func terminate(cmd *exec.Cmd, results <-chan Result) {
+	_ = syscall.Kill(-cmd.Process.Pid, syscall.SIGTERM)
+	waited := make(chan struct{})
+	go func() {
+		_ = cmd.Wait()
+		close(waited)
+	}()
+	select {
+	case <-waited:
+	case <-time.After(5 * time.Second):
+		_ = syscall.Kill(-cmd.Process.Pid, syscall.SIGKILL)
+		<-waited
+	}
+	for range results {
+	}
 }

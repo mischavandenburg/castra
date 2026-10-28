@@ -1,8 +1,7 @@
 # Direct Go dependencies. CI fails when go.mod differs from this list.
-# Each one is checked for maintenance and advisories before it is added.
-al.essio.dev/pkg/shellescape
+# Each one is checked for maintenance and advisories before it is added,
+# and each earns its place: see SECURITY.md, "Dependencies".
 github.com/creack/pty
-github.com/gofrs/flock
 github.com/pkg/sftp
 github.com/spf13/cobra
 golang.org/x/crypto

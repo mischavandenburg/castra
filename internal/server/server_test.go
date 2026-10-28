@@ -276,6 +276,49 @@ func TestAgentForwarding(t *testing.T) {
 	}
 }
 
+// TestAgentConnectionsCloseWithSession: a process that connected to the
+// forwarded socket while the session ran loses the agent when the session
+// ends, even if it never lets go of its connection.
+func TestAgentConnectionsCloseWithSession(t *testing.T) {
+	h, err := start(t, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	keyring := agent.NewKeyring()
+	_, agentKey, _ := ed25519.GenerateKey(rand.Reader)
+	_ = keyring.Add(agent.AddedKey{PrivateKey: agentKey, Comment: "held-key"})
+	if err := agent.ForwardToAgent(h.client, keyring); err != nil {
+		t.Fatal(err)
+	}
+	s, _ := h.client.NewSession()
+	if err := agent.RequestAgentForwarding(s); err != nil {
+		t.Fatal(err)
+	}
+	stdout, _ := s.StdoutPipe()
+	stdin, _ := s.StdinPipe()
+	if err := s.Start(`echo "$SSH_AUTH_SOCK"; read _`); err != nil {
+		t.Fatal(err)
+	}
+	sock, _ := bufio.NewReader(stdout).ReadString('\n')
+	held, err := net.Dial("unix", strings.TrimSpace(sock))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer held.Close()
+	if keys, err := agent.NewClient(held).List(); err != nil || len(keys) != 1 {
+		t.Fatalf("before the session ended: %v, %v", keys, err)
+	}
+
+	_, _ = io.WriteString(stdin, "done\n")
+	if err := s.Wait(); err != nil {
+		t.Fatal(err)
+	}
+	_ = held.SetDeadline(time.Now().Add(3 * time.Second))
+	if keys, err := agent.NewClient(held).List(); err == nil {
+		t.Fatalf("the held connection still lists %d key(s) after the session ended", len(keys))
+	}
+}
+
 func TestSessionWithoutAgentHasNoSocket(t *testing.T) {
 	h, err := start(t, nil)
 	if err != nil {

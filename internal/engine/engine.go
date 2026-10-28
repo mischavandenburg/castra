@@ -10,7 +10,7 @@ import (
 	"fmt"
 	"io"
 	"os/exec"
-	"path/filepath"
+	"slices"
 	"strings"
 )
 
@@ -20,16 +20,22 @@ type Engine struct {
 	Path string
 }
 
-// Detect finds the engine to use: the preferred one if named, otherwise
-// podman, then docker.
+// Names are the engines castra knows, in the order Detect tries them.
+var Names = []string{"podman", "docker"}
+
+// Detect finds the engine to use: the preferred one if named, otherwise the
+// first of Names that is installed.
 func Detect(preferred string) (Engine, error) {
-	candidates := []string{"podman", "docker"}
+	candidates := Names
 	if preferred != "" {
+		if !slices.Contains(Names, preferred) {
+			return Engine{}, fmt.Errorf("unknown container engine %q: castra runs on %s", preferred, strings.Join(Names, " or "))
+		}
 		candidates = []string{preferred}
 	}
 	for _, c := range candidates {
 		if p, err := exec.LookPath(c); err == nil {
-			return Engine{Name: filepath.Base(c), Path: p}, nil
+			return Engine{Name: c, Path: p}, nil
 		}
 	}
 	if preferred != "" {
@@ -51,26 +57,56 @@ func (e Engine) Running(ctx context.Context, id string) (bool, error) {
 	cmd.Stderr = &stderr
 	out, err := cmd.Output()
 	if err != nil {
-		return false, fmt.Errorf("%s inspect %s: %v: %s", e.Name, short(id), err, strings.TrimSpace(stderr.String()))
+		return false, fmt.Errorf("%s inspect %s: %v: %s", e.Name, ShortID(id), err, strings.TrimSpace(stderr.String()))
 	}
 	return strings.TrimSpace(string(out)) == "true", nil
 }
 
-// Status is the container's state as the engine names it (running, exited,
-// created, paused), or "missing" when the container no longer exists.
-func (e Engine) Status(ctx context.Context, id string) string {
-	out, err := exec.CommandContext(ctx, e.Path, "inspect", "--format", "{{.State.Status}}", id).Output()
+// States lists every container carrying label, by full id, with its state as
+// the engine names it (running, exited, created, paused). One call serves a
+// whole `castra ls`.
+func (e Engine) States(ctx context.Context, label string) (map[string]string, error) {
+	var stderr bytes.Buffer
+	cmd := exec.CommandContext(ctx, e.Path, "ps", "-a", "--no-trunc", "--filter", "label="+label, "--format", "{{.ID}} {{.State}}")
+	cmd.Stderr = &stderr
+	out, err := cmd.Output()
 	if err != nil {
-		return "missing"
+		return nil, fmt.Errorf("%s ps: %v: %s", e.Name, err, strings.TrimSpace(stderr.String()))
 	}
-	return strings.TrimSpace(string(out))
+	states := map[string]string{}
+	for _, line := range strings.Split(strings.TrimSpace(string(out)), "\n") {
+		if id, state, ok := strings.Cut(line, " "); ok {
+			states[id] = state
+		}
+	}
+	return states, nil
+}
+
+// exists reports whether the engine knows the container. An engine that
+// cannot be asked is an error, never a missing container.
+func (e Engine) exists(ctx context.Context, id string) (bool, error) {
+	var stderr bytes.Buffer
+	cmd := exec.CommandContext(ctx, e.Path, "inspect", "--format", "{{.Id}}", id)
+	cmd.Stderr = &stderr
+	if err := cmd.Run(); err != nil {
+		if strings.Contains(strings.ToLower(stderr.String()), "no such") {
+			return false, nil
+		}
+		return false, fmt.Errorf("%s inspect %s: %v: %s", e.Name, ShortID(id), err, strings.TrimSpace(stderr.String()))
+	}
+	return true, nil
 }
 
 // Remove stops the container (giving it ten seconds) and removes it. A
-// container that no longer exists is not an error. Images and named volumes
-// are left alone.
+// container that no longer exists is not an error; an engine that cannot be
+// reached is, so `castra delete` never reports success for nothing. Images
+// and named volumes are left alone.
 func (e Engine) Remove(ctx context.Context, id string) error {
-	if e.Status(ctx, id) == "missing" {
+	exists, err := e.exists(ctx, id)
+	if err != nil {
+		return err
+	}
+	if !exists {
 		return nil
 	}
 	_ = exec.CommandContext(ctx, e.Path, "stop", "-t", "10", id).Run()
@@ -78,7 +114,7 @@ func (e Engine) Remove(ctx context.Context, id string) error {
 	cmd := exec.CommandContext(ctx, e.Path, "rm", id)
 	cmd.Stderr = &stderr
 	if err := cmd.Run(); err != nil {
-		return fmt.Errorf("%s rm %s: %v: %s", e.Name, short(id), err, strings.TrimSpace(stderr.String()))
+		return fmt.Errorf("%s rm %s: %v: %s", e.Name, ShortID(id), err, strings.TrimSpace(stderr.String()))
 	}
 	return nil
 }
@@ -103,12 +139,13 @@ func (e Engine) Exec(ctx context.Context, user, id string, stdin io.Reader, args
 	cmd.Stderr = &stderr
 	out, err := cmd.Output()
 	if err != nil {
-		return out, fmt.Errorf("%s exec in %s: %v: %s", e.Name, short(id), err, strings.TrimSpace(stderr.String()))
+		return out, fmt.Errorf("%s exec in %s: %v: %s", e.Name, ShortID(id), err, strings.TrimSpace(stderr.String()))
 	}
 	return out, nil
 }
 
-func short(id string) string {
+// ShortID is the twelve-character container id the engines print themselves.
+func ShortID(id string) string {
 	if len(id) > 12 {
 		return id[:12]
 	}

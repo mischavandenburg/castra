@@ -3,6 +3,7 @@ package cli
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"os"
 	"runtime/debug"
@@ -50,13 +51,21 @@ Roman legions built the same camp at every stop. castra builds the same containe
 	return root
 }
 
-// Execute runs castra and returns the process exit code.
+// Execute runs castra and returns the process exit code. A cancelled context
+// means Ctrl-C reached a command that catches it (`up` while the devcontainer
+// CLI builds); everything else dies on the signal the ordinary way.
 func Execute() int {
-	if err := newRootCmd().ExecuteContext(context.Background()); err != nil {
+	err := newRootCmd().ExecuteContext(context.Background())
+	switch {
+	case err == nil:
+		return 0
+	case errors.Is(err, context.Canceled):
+		fmt.Fprintln(os.Stderr, "castra: interrupted")
+		return 130
+	default:
 		fmt.Fprintln(os.Stderr, "castra:", err)
 		return 1
 	}
-	return 0
 }
 
 func newVersionCmd() *cobra.Command {

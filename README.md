@@ -99,7 +99,13 @@ On the first `up` of each new container, castra clones it to `~/dotfiles` inside
 
 - **The environment** inside a session is the container's own, plus devcontainer.json's `remoteEnv`, plus `REMOTE_CONTAINERS=true`, `CASTRA=true` and `CASTRA_WORKSPACE=<name>`. `REMOTE_CONTAINERS` is what VS Code and DevPod set, and many dotfiles check it to know they run in a devcontainer, for example to leave `SSH_AUTH_SOCK` alone. Lifecycle commands get the same three variables.
 
-castra keeps its files in `~/.ssh/castra/` (its SSH config, client key and pinned host keys), `~/.local/state/castra/` (one record per workspace) and `~/.config/castra/config.yaml`. The only change it makes outside those is one `Include` line at the top of `~/.ssh/config`.
+castra keeps its files in `~/.ssh/castra/` (its client key, and one Host block and one pinned host key per workspace), `~/.local/state/castra/` (one record per workspace) and `~/.config/castra/config.yaml`. The only change it makes outside those is one `Include` line at the top of `~/.ssh/config`.
+
+What the container can and cannot reach, and how to report a problem: [SECURITY.md](SECURITY.md).
+
+## Testing
+
+`go test -race ./...` runs the unit tests, which include the SSH server against a real client, the dotfiles script under `sh`, and the quoting that stands between devcontainer.json and the shell. `test/e2e/run --engine podman` (or `docker`) runs the whole surface against the fixture in `test/fixtures/e2e` on a machine with the engine installed: up, ssh, the forwarded agent, scp, dotfiles, recreate and delete. It uses a throwaway ssh-agent and cleans up after itself.
 
 ## Podman or Docker
 

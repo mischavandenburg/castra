@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"os"
 	"os/exec"
+	"os/user"
 	"strings"
 
 	"github.com/spf13/cobra"
@@ -45,7 +46,7 @@ func newDoctorCmd() *cobra.Command {
 				fmt.Fprintf(out, "engine: %s (%s)\n", v, eng.Path)
 				if eng.Name == "podman" && os.Getuid() != 0 && !lingering(ctx) {
 					fmt.Fprintf(out, "linger: off, so rootless Podman stops your containers when your last login session ends\n"+
-						"        (on a machine you reach over SSH, run: sudo loginctl enable-linger %s)\n", os.Getenv("USER"))
+						"        (on a machine you reach over SSH, run: sudo loginctl enable-linger %s)\n", userName())
 				}
 			}
 			if cli, err := devcontainer.FindCLI(ctx); err != nil {
@@ -67,7 +68,7 @@ func newDoctorCmd() *cobra.Command {
 				fmt.Fprintln(out, "ssh-agent: SSH_AUTH_SOCK is set")
 			}
 			if paths, err := sshconfig.DefaultPaths(); err == nil {
-				if b, err := os.ReadFile(paths.UserConfig); err == nil && strings.Contains(string(b), "# BEGIN castra") {
+				if paths.HasInclude() {
 					fmt.Fprintf(out, "ssh config: %s includes castra's hosts\n", paths.UserConfig)
 				} else {
 					fmt.Fprintf(out, "ssh config: no castra Include in %s yet (added on the first `castra up`)\n", paths.UserConfig)
@@ -85,9 +86,18 @@ func newDoctorCmd() *cobra.Command {
 // logout. Without it, rootless Podman containers die with the last session.
 // Where loginctl is absent (no systemd), there is nothing to warn about.
 func lingering(ctx context.Context) bool {
-	out, err := exec.CommandContext(ctx, "loginctl", "show-user", os.Getenv("USER"), "--property=Linger", "--value").Output()
+	out, err := exec.CommandContext(ctx, "loginctl", "show-user", userName(), "--property=Linger", "--value").Output()
 	if err != nil {
 		return true
 	}
 	return strings.TrimSpace(string(out)) == "yes"
+}
+
+// userName is the login name, from the account database rather than $USER,
+// which cron jobs and some shells leave unset.
+func userName() string {
+	if u, err := user.Current(); err == nil && u.Username != "" {
+		return u.Username
+	}
+	return os.Getenv("USER")
 }
