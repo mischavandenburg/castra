@@ -27,9 +27,15 @@ func newDoctorCmd() *cobra.Command {
 			fmt.Fprintln(out, "castra:", Version())
 
 			cfg, err := config.Load()
-			if err != nil {
+			cfgPath, _ := config.Path()
+			switch {
+			case err != nil:
 				fmt.Fprintln(out, "config: error:", err)
 				ok = false
+			case cfg.Dotfiles.Repo == "":
+				fmt.Fprintf(out, "dotfiles: none configured (set dotfiles.repo in %s)\n", cfgPath)
+			default:
+				fmt.Fprintf(out, "dotfiles: %s\n", cfg.Dotfiles.Repo)
 			}
 			if eng, err := engine.Detect(cfg.Engine); err != nil {
 				fmt.Fprintln(out, "engine: missing (install podman, or docker)")

@@ -56,6 +56,16 @@ func (e Engine) Running(ctx context.Context, id string) (bool, error) {
 	return strings.TrimSpace(string(out)) == "true", nil
 }
 
+// Status is the container's state as the engine names it (running, exited,
+// created, paused), or "missing" when the container no longer exists.
+func (e Engine) Status(ctx context.Context, id string) string {
+	out, err := exec.CommandContext(ctx, e.Path, "inspect", "--format", "{{.State.Status}}", id).Output()
+	if err != nil {
+		return "missing"
+	}
+	return strings.TrimSpace(string(out))
+}
+
 // ExecArgs is the argv that runs args inside the container as user, with
 // stdin attached and no terminal.
 func (e Engine) ExecArgs(user, id string, args ...string) []string {

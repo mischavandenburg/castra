@@ -155,6 +155,9 @@ func up(ctx context.Context, target string, f upFlags, log io.Writer) (workspace
 		if err := installDotfiles(ctx, st, paths, repo, cfg.Dotfiles.Install, f.dotfilesRefresh, log); err != nil {
 			return st, err
 		}
+	} else if prevErr != nil || prev.ContainerID != st.ContainerID {
+		cfgPath, _ := config.Path()
+		fmt.Fprintf(log, "castra: no dotfiles configured; to install yours in every new container, add to %s:\n  dotfiles:\n    repo: git@github.com:you/dotfiles.git\n", cfgPath)
 	}
 	fmt.Fprintf(log, "castra: %s is up. Connect with `castra ssh %s` or `ssh %s`\n", name, name, st.Alias())
 	return st, nil

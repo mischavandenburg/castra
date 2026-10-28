@@ -40,6 +40,7 @@ Roman legions built the same camp at every stop. castra builds the same containe
 	root.AddCommand(
 		newUpCmd(),
 		newSSHCmd(),
+		newListCmd(),
 		newDoctorCmd(),
 		newVersionCmd(),
 		newProxyCmd(),

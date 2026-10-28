@@ -42,6 +42,12 @@ Run a single command instead of a shell:
 castra ssh my-project -- git status
 ```
 
+See your workspaces and whether their containers are running (`--json` for scripts):
+
+```console
+castra ls
+```
+
 Rebuild from scratch after you change the Dockerfile or devcontainer.json:
 
 ```console
