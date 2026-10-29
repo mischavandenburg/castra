@@ -36,6 +36,9 @@ type State struct {
 	RemoteUser  string `json:"remoteUser"`
 	RemoteHome  string `json:"remoteHome"`
 	Workdir     string `json:"workdir"`
+	// ServerSum is the sha256 of the castra server installed in the
+	// container; a connection from another build installs its own first.
+	ServerSum string `json:"serverSum,omitempty"`
 }
 
 // Alias is the SSH host name of the workspace.

@@ -1,11 +1,12 @@
 package cli
 
 import (
+	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"os"
-	"strings"
 	"syscall"
 
 	"github.com/spf13/cobra"
@@ -103,18 +104,11 @@ func newProxyCmd() *cobra.Command {
 			if !running {
 				return fmt.Errorf("workspace %s is not running: run `castra up %s`", st.Name, st.Name)
 			}
-			paths, err := sshconfig.DefaultPaths()
-			if err != nil {
+			if err := refreshServer(cmd.Context(), eng, st, cmd.ErrOrStderr()); err != nil {
 				return err
-			}
-			pub, err := os.ReadFile(paths.ClientKey + ".pub")
-			if err != nil {
-				return fmt.Errorf("read castra client key: %w (run `castra up` again)", err)
 			}
 			argv := eng.ExecArgs(st.RemoteUser, st.ContainerID,
 				serverPath(st), "server", "--stdio",
-				"--host-key", hostKeyPath(st),
-				"--authorized-key", strings.TrimSpace(string(pub)),
 				"--workdir", st.Workdir,
 				"--workspace", st.Name,
 				"--remote-env-file", remoteEnvPath(st),
@@ -124,11 +118,35 @@ func newProxyCmd() *cobra.Command {
 	}
 }
 
+// refreshServer installs this build of castra in the container when the one
+// there is from another build, so a `castra` upgrade on the host never meets
+// an older server that does not know its flags. Most connections cost one
+// hash of the local binary; only the first after an upgrade copies it in.
+func refreshServer(ctx context.Context, eng engine.Engine, st workspace.State, log io.Writer) error {
+	self, err := readSelf()
+	if err != nil {
+		return err
+	}
+	if self.sum == st.ServerSum {
+		return nil
+	}
+	held, err := workspace.Lock(st.Name)
+	if err != nil {
+		return err
+	}
+	defer func() { _ = held.Release() }()
+	if err := installServer(ctx, eng, st, self, log); err != nil {
+		return err
+	}
+	st.ServerSum = self.sum
+	return workspace.Save(st)
+}
+
 // newServerCmd runs inside the container. Its stdout is the SSH stream, so
 // nothing else may ever be written there.
 func newServerCmd() *cobra.Command {
 	var stdio bool
-	var hostKey, authorizedKey, workdir, workspaceName, remoteEnvFile string
+	var workdir, workspaceName, remoteEnvFile string
 	cmd := &cobra.Command{
 		Use:    "server",
 		Hidden: true,
@@ -136,10 +154,6 @@ func newServerCmd() *cobra.Command {
 		RunE: func(cmd *cobra.Command, _ []string) error {
 			if !stdio {
 				return errors.New("castra server only runs with --stdio")
-			}
-			key, err := os.ReadFile(hostKey)
-			if err != nil {
-				return err
 			}
 			var remoteEnv map[string]*string
 			if remoteEnvFile != "" {
@@ -155,17 +169,13 @@ func newServerCmd() *cobra.Command {
 				}
 			}
 			return server.ServeStdio(server.Options{
-				HostKey:       key,
-				AuthorizedKey: []byte(authorizedKey),
-				Workdir:       workdir,
-				Workspace:     workspaceName,
-				RemoteEnv:     remoteEnv,
+				Workdir:   workdir,
+				Workspace: workspaceName,
+				RemoteEnv: remoteEnv,
 			})
 		},
 	}
 	cmd.Flags().BoolVar(&stdio, "stdio", false, "speak SSH on stdin and stdout")
-	cmd.Flags().StringVar(&hostKey, "host-key", "", "path of the private host key")
-	cmd.Flags().StringVar(&authorizedKey, "authorized-key", "", "the one client public key allowed in (authorized_keys format)")
 	cmd.Flags().StringVar(&workdir, "workdir", "", "directory sessions start in")
 	cmd.Flags().StringVar(&workspaceName, "workspace", "", "workspace name, exported as CASTRA_WORKSPACE")
 	cmd.Flags().StringVar(&remoteEnvFile, "remote-env-file", "", "JSON file with devcontainer.json's resolved remoteEnv")

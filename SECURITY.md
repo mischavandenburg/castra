@@ -12,20 +12,25 @@ While a `castra ssh` session is open, the container can use your ssh-agent. Anyt
 
 - Your private keys. Only signatures travel, over the agent protocol.
 - Your host's agent socket. It is never mounted into the container; castra makes a per-session socket inside instead, in a directory only your user can open.
-- A network listener. Every byte between host and container rides on `podman exec -i` (or `docker exec -i`), which the engine authenticates by ownership of its own socket. castra opens no port on the host or in the container. The server inside refuses port forwarding requests, but since the container's user can replace that binary, the control that holds is on your side: the Host block clears every forward except the agent.
+- A network listener of castra's own. Every byte between host and container rides on `podman exec -i` (or `docker exec -i`), which the engine authenticates by ownership of its own socket. castra opens no port on the host or in the container; a port exists only when you forward one with `ssh -L` or `ssh -R`, and an `-R` listener closes with its connection.
 
-## How castra authenticates
+## No keys, as in DevPod
 
-- Each container gets its own ed25519 host key, generated on the host at `castra up` and copied into the container (mode 0600, in the remote user's home). Its public half is pinned in `~/.ssh/castra/known_hosts.d/<workspace>`, and the Host block castra writes sets `StrictHostKeyChecking yes`. A recreated container gets a new key and a new pin.
-- Your side authenticates with castra's own key pair, `~/.ssh/castra/id_ed25519`, created once. The server inside the container accepts that one public key and nothing else.
-- The Host block also pins the client's policy, so a hostile container running a server of its own gets nothing from you: public key only (`PasswordAuthentication no`, `KbdInteractiveAuthentication no`, so no prompt it sends ever reaches your terminal), the agent and nothing else forwarded (`ForwardX11 no`, `ClearAllForwardings yes`), no connection sharing (`ControlMaster no`), and no host key updates from the server. These hold whatever your own `Host *` block says.
-- The server speaks session channels only: a shell, a command, or sftp. When a session ends, every connection a process in the container still holds to the forwarded agent is closed with it, and a program whose client went away gets SIGHUP, as a terminal hangup would send it. A program that ignores SIGHUP (`nohup`, a daemon) keeps running, by its own choice.
+castra handles SSH the way DevPod does for local containers. The containers run on your own machine, and the only way in is the engine's `exec`, which only you can run, so there is no network in between for anyone to impersonate:
+
+- The server inside the container asks the client for no key. castra keeps no client key of its own.
+- The server makes a fresh host key every time it starts, and the Host block tells OpenSSH not to check it (`StrictHostKeyChecking no`, `UserKnownHostsFile /dev/null`), exactly as DevPod's does.
+- Port forwarding works both ways, for TCP ports and Unix sockets, as with DevPod.
+
+The trade, the same one DevPod makes: OpenSSH cannot tell castra's server from another program in the container that takes its place. Code that can replace files in the container can already do whatever your user can do there, so the line that matters stays the one above: run castra only on devcontainers you trust.
+
+When a session ends, every connection a process in the container still holds to the forwarded agent is closed with it, and a program whose client went away gets SIGHUP, as a terminal hangup would send it. A program that ignores SIGHUP (`nohup`, a daemon) keeps running, by its own choice.
 
 ## What castra writes
 
-On your machine: `~/.ssh/castra/` (its client key, one `hosts/<workspace>.conf` Host block and one `known_hosts.d/<workspace>` pinned key per workspace, and a `config` that includes the host files), `~/.local/state/castra/` (one record and one lock file per workspace), and one `Include` line at the top of `~/.ssh/config`, between `# BEGIN castra` and `# END castra` markers. If `~/.ssh/config` is a symlink, castra writes through to its target. It reads `~/.config/castra/config.yaml`.
+On your machine: `~/.ssh/castra/` (one `hosts/<workspace>.conf` Host block per workspace and a `config` that includes them), `~/.local/state/castra/` (one record and one lock file per workspace), and one `Include` line at the top of `~/.ssh/config`, between `# BEGIN castra` and `# END castra` markers. If `~/.ssh/config` is a symlink, castra writes through to its target. It reads `~/.config/castra/config.yaml`.
 
-In the container: `~/.castra/` in the remote user's home, holding the castra binary, the host key and the resolved `remoteEnv`.
+In the container: `~/.castra/` in the remote user's home, holding the castra binary and the resolved `remoteEnv`.
 
 ## Inputs castra does not trust
 

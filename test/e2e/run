@@ -7,7 +7,7 @@
 # git, and the devcontainer CLI. It starts its own ssh-agent with a throwaway
 # key, so your agent is never used, and it deletes the workspace it made
 # unless --keep is given. It touches your real castra files the way any
-# `castra up` does: a workspace record, a Host file and a pinned host key,
+# `castra up` does: a workspace record and a Host file,
 # all removed again by `castra delete` at the end.
 set -uo pipefail
 
@@ -137,10 +137,32 @@ echo "e2e $(date +%s)" > "$tmp/note.txt"
 check "scp into the workspace" scp -q "$tmp/note.txt" "$name.castra:/workspaces/$name/note-in.txt" </dev/null
 check "scp back out" scp -q "$name.castra:/workspaces/$name/note-in.txt" "$tmp/note-back.txt" </dev/null
 check "the copy is byte-identical" cmp -s "$tmp/note.txt" "$tmp/note-back.txt"
-expect "one pinned host key line" 1 "$(count "^$name.castra " "$castra_dir/known_hosts.d/$name")"
-expect "the Host block pins strictly" 1 "$(count 'StrictHostKeyChecking yes' "$castra_dir/hosts/$name.conf")"
-expect "the Host block allows no password prompt" 1 "$(count 'PasswordAuthentication no' "$castra_dir/hosts/$name.conf")"
-expect "the Host block forwards only the agent" 1 "$(count 'ClearAllForwardings yes' "$castra_dir/hosts/$name.conf")"
+expect "the Host block skips host key checks, as DevPod's does" 1 "$(count 'StrictHostKeyChecking no' "$castra_dir/hosts/$name.conf")"
+expect "the Host block keeps no known hosts, as DevPod's does" 1 "$(count 'UserKnownHostsFile /dev/null' "$castra_dir/hosts/$name.conf")"
+check "no castra key or pin on the host" test ! -e "$castra_dir/id_ed25519" -a ! -e "$castra_dir/known_hosts" -a ! -e "$castra_dir/known_hosts.d"
+check "no host key file in the container" in_ws test ! -e /home/vscode/.castra/host_key
+
+# port forwarding both ways. The fixture runs with --network=host, so a port
+# on 127.0.0.1 inside the container is the host's own; the target is this
+# machine's sshd, whose banner proves the bytes went through.
+banner() { timeout 5 bash -c 'exec 3<>"/dev/tcp/127.0.0.1/$1" && head -c 7 <&3' _ "$1" 2>/dev/null; }
+if [ "$(banner 22)" = SSH-2.0 ]; then
+  lport=$((20000 + RANDOM % 5000)) rport=$((25000 + RANDOM % 5000))
+  ssh -o ExitOnForwardFailure=yes -N -L "127.0.0.1:$lport:127.0.0.1:22" "$name.castra" </dev/null &
+  lpid=$!
+  for _ in $(seq 1 50); do [ "$(banner "$lport")" = SSH-2.0 ] && break; sleep 0.1; done
+  expect "ssh -L carries traffic through the container" SSH-2.0 "$(banner "$lport")"
+  kill "$lpid" 2>/dev/null; wait "$lpid" 2>/dev/null
+  ssh -o ExitOnForwardFailure=yes -N -R "127.0.0.1:$rport:127.0.0.1:22" "$name.castra" </dev/null &
+  rpid=$!
+  for _ in $(seq 1 50); do [ "$(in_ws bash -c 'exec 3<>"/dev/tcp/127.0.0.1/$1" && head -c 7 <&3' _ "$rport")" = SSH-2.0 ] && break; sleep 0.1; done
+  expect "ssh -R carries traffic back out of the container" SSH-2.0 "$(in_ws bash -c 'exec 3<>"/dev/tcp/127.0.0.1/$1" && head -c 7 <&3' _ "$rport")"
+  kill "$rpid" 2>/dev/null; wait "$rpid" 2>/dev/null
+  sleep 1
+  refute "the -R listener closes with its connection" in_ws bash -c 'exec 3<>"/dev/tcp/127.0.0.1/$1"' _ "$rport"
+else
+  echo "SKIP  port forwarding: nothing answers on 127.0.0.1:22 here to forward to"
+fi
 
 # the fixture's config: mount, lifecycle hooks, ownership
 check "bind mount is readable inside" in_ws test -r /mnt/fixture/hello
@@ -177,15 +199,13 @@ check "recreate changed the container id" test "$new" != "$ctr" -a -n "$new"
 expect "still one container" 1 "$(ctr_count)"
 check "postCreateCommand ran again" test "$(in_ws cat /tmp/castra-created)" != "$created"
 check "dotfiles installed in the new container" in_ws test -f /home/vscode/dotfiles/.installed
-expect "still one pinned host key line" 1 "$(count "^$name.castra " "$castra_dir/known_hosts.d/$name")"
-check "plain ssh works against the new pin" ssh "$name.castra" true </dev/null
+check "plain ssh reaches the new container" ssh "$name.castra" true </dev/null
 
 # delete: container and records gone, images, volumes and the folder kept
 images_before="$("$engine" images -q | sort -u | wc -l)"
 volumes_before="$("$engine" volume ls -q | wc -l)"
 check "castra delete -y" "$CASTRA" delete "$name" -y </dev/null
 expect "no container left" 0 "$(ctr_count)"
-check "no pinned host key left" test ! -e "$castra_dir/known_hosts.d/$name"
 check "no Host file left" test ! -e "$castra_dir/hosts/$name.conf"
 check "the folder is untouched" test -f "$dir/.devcontainer/devcontainer.json" -a -f "$dir/owned"
 expect "images untouched" "$images_before" "$("$engine" images -q | sort -u | wc -l)"

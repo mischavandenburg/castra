@@ -21,56 +21,40 @@ func testPaths(t *testing.T) Paths {
 
 var demo = workspace.State{Name: "demo", RemoteUser: "dev"}
 
+// TestRenderBlock: the Host block is DevPod's, with castra's ProxyCommand and
+// a keepalive, and names no key of castra's.
 func TestRenderBlock(t *testing.T) {
-	p := testPaths(t)
-	cfg, err := Render(demo, "/opt/my tools/castra", p)
+	cfg, err := Render(demo, "/opt/my tools/castra")
 	if err != nil {
 		t.Fatal(err)
 	}
-	for _, want := range []string{
-		"Host demo.castra\n",
-		"HostKeyAlias demo.castra\n",
-		"User dev\n",
-		"ProxyCommand '/opt/my tools/castra' proxy demo\n",
-		"IdentityFile " + p.ClientKey + "\n",
-		"IdentitiesOnly yes\n",
-		"UserKnownHostsFile " + p.PinFile("demo") + "\n",
-		"StrictHostKeyChecking yes\n",
-		"UpdateHostKeys no\n",
-		// Only castra's key, never a prompt a hostile server could send.
-		"PreferredAuthentications publickey\n",
-		"PasswordAuthentication no\n",
-		"KbdInteractiveAuthentication no\n",
-		// The agent and nothing else, whatever `Host *` says.
-		"ForwardAgent yes\n",
-		"ForwardX11 no\n",
-		"ClearAllForwardings yes\n",
-		"ControlMaster no\n",
-		"ControlPath none\n",
-	} {
-		if !strings.Contains(cfg, want) {
-			t.Errorf("config lacks %q:\n%s", want, cfg)
-		}
-	}
-	if strings.Contains(cfg, "StrictHostKeyChecking no") {
-		t.Error("host key checking switched off")
+	want := "# Managed by castra for workspace demo. Rewritten on `castra up`; edits are lost.\n" +
+		"Host demo.castra\n" +
+		"  ForwardAgent yes\n" +
+		"  LogLevel error\n" +
+		"  StrictHostKeyChecking no\n" +
+		"  UserKnownHostsFile /dev/null\n" +
+		"  ProxyCommand '/opt/my tools/castra' proxy demo\n" +
+		"  User dev\n" +
+		"  ServerAliveInterval 30\n"
+	if cfg != want {
+		t.Fatalf("Host block:\n%s\nwant:\n%s", cfg, want)
 	}
 }
 
 // TestRenderRefusesUnsafeValues: the remote user comes from devcontainer.json
 // and is written into ssh_config here, so this is where it is checked.
 func TestRenderRefusesUnsafeValues(t *testing.T) {
-	p := testPaths(t)
 	for _, bad := range []string{"dev\nProxyCommand evil", `dev"`, "dev\tx", ""} {
-		if _, err := Render(workspace.State{Name: "demo", RemoteUser: bad}, "/usr/bin/castra", p); err == nil {
+		if _, err := Render(workspace.State{Name: "demo", RemoteUser: bad}, "/usr/bin/castra"); err == nil {
 			t.Errorf("remote user %q was written", bad)
 		}
 	}
-	cfg, err := Render(workspace.State{Name: "demo", RemoteUser: "dev user"}, "/usr/bin/castra", p)
+	cfg, err := Render(workspace.State{Name: "demo", RemoteUser: "dev user"}, "/usr/bin/castra")
 	if err != nil || !strings.Contains(cfg, "User \"dev user\"\n") {
 		t.Fatalf("a user with a space should be quoted: %v\n%s", err, cfg)
 	}
-	if _, err := Render(demo, "/opt/\"quoted\"/castra", p); err == nil {
+	if _, err := Render(demo, "/opt/\"quoted\"/castra"); err == nil {
 		t.Error("a binary path with a double quote was written")
 	}
 }
@@ -82,39 +66,11 @@ func TestProxyCommandEscapesPercent(t *testing.T) {
 	}
 }
 
-func TestPinHostKeyReplacesOldKey(t *testing.T) {
-	p := testPaths(t)
-	other := workspace.State{Name: "other", RemoteUser: "dev"}
-	_, first, _ := NewKey("one")
-	_, second, _ := NewKey("two")
-	_, otherKey, _ := NewKey("other")
-	if err := p.PinHostKey(other, otherKey); err != nil {
-		t.Fatal(err)
-	}
-	if err := p.PinHostKey(demo, first); err != nil {
-		t.Fatal(err)
-	}
-	if err := p.PinHostKey(demo, second); err != nil {
-		t.Fatal(err)
-	}
-	b, _ := os.ReadFile(p.PinFile("demo"))
-	if n := strings.Count(string(b), "demo.castra "); n != 1 || strings.Contains(string(b), "other.castra") {
-		t.Fatalf("demo's pin file:\n%s", b)
-	}
-	if !p.HasHostKey(demo) || !p.HasHostKey(other) || p.HasHostKey(workspace.State{Name: "missing"}) {
-		t.Fatal("HasHostKey is wrong")
-	}
-}
-
 func TestWriteHostAndRemoveHost(t *testing.T) {
 	p := testPaths(t)
 	kept := workspace.State{Name: "kept", RemoteUser: "dev"}
-	_, key, _ := NewKey("k")
 	for _, s := range []workspace.State{demo, kept} {
 		if err := p.WriteHost(s, "/usr/bin/castra"); err != nil {
-			t.Fatal(err)
-		}
-		if err := p.PinHostKey(s, key); err != nil {
 			t.Fatal(err)
 		}
 	}
@@ -132,29 +88,34 @@ func TestWriteHostAndRemoveHost(t *testing.T) {
 	if err := p.RemoveHost(demo); err != nil {
 		t.Fatalf("removing twice: %v", err)
 	}
-	for _, f := range []string{p.HostFile("demo"), p.PinFile("demo")} {
-		if _, err := os.Stat(f); err == nil {
-			t.Fatalf("%s still exists", f)
-		}
+	if _, err := os.Stat(p.HostFile("demo")); err == nil {
+		t.Fatal("demo's host file still exists")
 	}
-	if _, err := os.Stat(p.HostFile("kept")); err != nil || !p.HasHostKey(kept) {
+	if _, err := os.Stat(p.HostFile("kept")); err != nil {
 		t.Fatal("removing one workspace touched another")
 	}
 }
 
-func TestMigrateSplitsTheSharedFiles(t *testing.T) {
+// TestMigrateFromKeyedLayouts: both earlier layouts (one shared config and
+// known_hosts; one file per workspace with pins and a client key) end as one
+// DevPod-style host file per workspace, with every key and pin file gone.
+func TestMigrateFromKeyedLayouts(t *testing.T) {
 	p := testPaths(t)
-	if err := os.MkdirAll(p.Dir, 0o700); err != nil {
+	if err := os.MkdirAll(filepath.Join(p.Dir, "known_hosts.d"), 0o700); err != nil {
 		t.Fatal(err)
 	}
-	_, a, _ := NewKey("a")
-	_, b, _ := NewKey("b")
-	shared := "demo.castra " + string(a.Type()) + " x\nkept.castra " + string(b.Type()) + " y\n"
-	if err := os.WriteFile(filepath.Join(p.Dir, "known_hosts"), []byte(shared), 0o600); err != nil {
-		t.Fatal(err)
-	}
-	if err := os.WriteFile(p.Config, []byte("Host demo.castra\n  User dev\n"), 0o600); err != nil {
-		t.Fatal(err)
+	for name, body := range map[string]string{
+		"known_hosts":        "demo.castra ssh-ed25519 AAAA\n",
+		"known_hosts.d/kept": "kept.castra ssh-ed25519 AAAA\n",
+		"id_ed25519":         "private\n",
+		"id_ed25519.pub":     "ssh-ed25519 AAAA castra\n",
+		"config":             "Host demo.castra\n  User dev\n  IdentityFile ~/.ssh/castra/id_ed25519\n",
+	} {
+		path := filepath.Join(p.Dir, name)
+		_ = os.MkdirAll(filepath.Dir(path), 0o700)
+		if err := os.WriteFile(path, []byte(body), 0o600); err != nil {
+			t.Fatal(err)
+		}
 	}
 	kept := workspace.State{Name: "kept", RemoteUser: "dev"}
 	load := func() ([]workspace.State, error) { return []workspace.State{demo, kept}, nil }
@@ -162,23 +123,25 @@ func TestMigrateSplitsTheSharedFiles(t *testing.T) {
 		t.Fatal(err)
 	}
 	for _, s := range []workspace.State{demo, kept} {
-		pin, _ := os.ReadFile(p.PinFile(s.Name))
-		if !strings.HasPrefix(string(pin), s.Alias()+" ") {
-			t.Fatalf("%s's pin after the migration: %q", s.Name, pin)
-		}
-		if _, err := os.Stat(p.HostFile(s.Name)); err != nil {
-			t.Fatalf("%s has no host file after the migration", s.Name)
+		block, err := os.ReadFile(p.HostFile(s.Name))
+		if err != nil || !strings.Contains(string(block), "StrictHostKeyChecking no\n") || strings.Contains(string(block), "IdentityFile") {
+			t.Fatalf("%s's host file after the migration (%v):\n%s", s.Name, err, block)
 		}
 	}
-	if _, err := os.Stat(filepath.Join(p.Dir, "known_hosts")); err == nil {
-		t.Fatal("the shared known_hosts is still there")
+	for _, name := range legacy {
+		if _, err := os.Lstat(filepath.Join(p.Dir, name)); err == nil {
+			t.Fatalf("%s is still there after the migration", name)
+		}
 	}
 	cfg, _ := os.ReadFile(p.Config)
 	if !strings.Contains(string(cfg), "Include ") || strings.Contains(string(cfg), "Host demo.castra") {
 		t.Fatalf("castra's config after the migration:\n%s", cfg)
 	}
-	if err := p.Migrate(load, "/usr/bin/castra"); err != nil {
-		t.Fatalf("a second migration should do nothing: %v", err)
+	if err := p.Migrate(func() ([]workspace.State, error) {
+		t.Fatal("a second migration should not load anything")
+		return nil, nil
+	}, "/usr/bin/castra"); err != nil {
+		t.Fatalf("a second migration: %v", err)
 	}
 }
 
@@ -236,23 +199,5 @@ func TestEnsureIncludeWritesThroughSymlink(t *testing.T) {
 	b, _ := os.ReadFile(target)
 	if !strings.Contains(string(b), "Include "+p.Config) || !strings.HasSuffix(string(b), "Host mine\n  User me\n") {
 		t.Fatalf("symlink target now:\n%s", b)
-	}
-}
-
-func TestClientKeyIsCreatedOnce(t *testing.T) {
-	p := testPaths(t)
-	a, err := p.EnsureClientKey()
-	if err != nil {
-		t.Fatal(err)
-	}
-	b, err := p.EnsureClientKey()
-	if err != nil || string(a) != string(b) {
-		t.Fatal("second call made a new key")
-	}
-	if fi, _ := os.Stat(p.ClientKey); fi.Mode().Perm() != 0o600 {
-		t.Fatalf("private key mode %v", fi.Mode().Perm())
-	}
-	if fi, _ := os.Stat(filepath.Dir(p.ClientKey)); fi.Mode().Perm() != 0o700 {
-		t.Fatalf("key dir mode %v", fi.Mode().Perm())
 	}
 }

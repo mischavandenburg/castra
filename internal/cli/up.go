@@ -114,11 +114,8 @@ func up(ctx context.Context, target string, f upFlags, log io.Writer) (workspace
 	if err != nil {
 		return workspace.State{}, err
 	}
-	self, err := executable()
+	self, err := readSelf()
 	if err != nil {
-		return workspace.State{}, err
-	}
-	if err := paths.Migrate(workspace.All, self); err != nil {
 		return workspace.State{}, err
 	}
 
@@ -146,24 +143,22 @@ func up(ctx context.Context, target string, f upFlags, log io.Writer) (workspace
 		return st, err
 	}
 	st.RemoteHome = facts.home
-	if err := installServer(ctx, eng, st, facts, self, log); err != nil {
-		return st, err
+	if facts.arch != runtime.GOARCH {
+		return st, fmt.Errorf("the container is %s and this castra is %s; mixed architectures need a release build", facts.arch, runtime.GOARCH)
 	}
-	if err := writeRemoteEnv(ctx, eng, st, res.MergedConfiguration.RemoteEnv); err != nil {
-		return st, err
-	}
-	if fresh || !paths.HasHostKey(st) || !facts.hostKey {
-		if err := rotateHostKey(ctx, eng, st, paths); err != nil {
+	if facts.serverSum != self.sum {
+		if err := installServer(ctx, eng, st, self, log); err != nil {
 			return st, err
 		}
 	}
-	if _, err := paths.EnsureClientKey(); err != nil {
+	st.ServerSum = self.sum
+	if err := writeRemoteEnv(ctx, eng, st, res.MergedConfiguration.RemoteEnv); err != nil {
 		return st, err
 	}
 	if err := workspace.Save(st); err != nil {
 		return st, err
 	}
-	if err := paths.WriteHost(st, self); err != nil {
+	if err := paths.WriteHost(st, self.path); err != nil {
 		return st, err
 	}
 	if changed, err := paths.EnsureInclude(); err != nil {
@@ -191,25 +186,58 @@ func up(ctx context.Context, target string, f upFlags, log io.Writer) (workspace
 	return st, nil
 }
 
-func executable() (string, error) {
-	self, err := os.Executable()
+// binary is this castra executable: its path, its bytes and their sha256.
+type binary struct {
+	path string
+	data []byte
+	sum  string
+}
+
+func readSelf() (binary, error) {
+	path, err := selfPath()
+	if err != nil {
+		return binary{}, err
+	}
+	data, err := os.ReadFile(path)
+	if err != nil {
+		return binary{}, err
+	}
+	sum := sha256.Sum256(data)
+	return binary{path: path, data: data, sum: hex.EncodeToString(sum[:])}, nil
+}
+
+// selfPath is where this castra executable lives, symlinks resolved, as the
+// ProxyCommand names it.
+func selfPath() (string, error) {
+	path, err := os.Executable()
 	if err != nil {
 		return "", err
 	}
-	return filepath.EvalSymlinks(self)
+	return filepath.EvalSymlinks(path)
+}
+
+// migrate brings castra's SSH files from an older build to this layout.
+func migrate() error {
+	paths, err := sshconfig.DefaultPaths()
+	if err != nil {
+		return err
+	}
+	self, err := selfPath()
+	if err != nil {
+		return err
+	}
+	return paths.Migrate(workspace.All, self)
 }
 
 // castra's files in the remote user's home. The probe passes these names to
 // its script as arguments, so the layout lives here and nowhere else.
 const (
 	remoteBin      = ".castra/bin/castra"
-	remoteHostKey  = ".castra/host_key"
 	remoteEnvFile  = ".castra/remote-env.json"
 	remoteDotfiles = "dotfiles"
 )
 
 func serverPath(st workspace.State) string    { return st.RemoteHome + "/" + remoteBin }
-func hostKeyPath(st workspace.State) string   { return st.RemoteHome + "/" + remoteHostKey }
 func remoteEnvPath(st workspace.State) string { return st.RemoteHome + "/" + remoteEnvFile }
 
 // facts is what one probe of the container tells castra.
@@ -217,7 +245,6 @@ type facts struct {
 	home      string // the remote user's home directory
 	arch      string // GOARCH of the container
 	serverSum string // sha256 of the installed server, or ""
-	hostKey   bool   // the host key is in place
 	dotfiles  bool   // ~/dotfiles is a git checkout
 }
 
@@ -229,22 +256,20 @@ cd "$h" || exit 1
 printf '%s\n' "$h"
 uname -m
 cat "$1.sha256" 2>/dev/null; echo
-test -s "$2" && echo yes || echo no
-test -d "$3/.git" && echo yes || echo no`
-	out, err := eng.Exec(ctx, st.RemoteUser, st.ContainerID, nil, "sh", "-c", script, "sh", remoteBin, remoteHostKey, remoteDotfiles)
+test -d "$2/.git" && echo yes || echo no`
+	out, err := eng.Exec(ctx, st.RemoteUser, st.ContainerID, nil, "sh", "-c", script, "sh", remoteBin, remoteDotfiles)
 	if err != nil {
 		return facts{}, err
 	}
 	lines := strings.Split(strings.TrimRight(string(out), "\n"), "\n")
-	if len(lines) != 5 || lines[0] == "" {
+	if len(lines) != 4 || lines[0] == "" {
 		return facts{}, fmt.Errorf("could not read the container's user, home and state (%q)", out)
 	}
 	return facts{
 		home:      lines[0],
 		arch:      goArch(strings.TrimSpace(lines[1])),
 		serverSum: strings.TrimSpace(lines[2]),
-		hostKey:   lines[3] == "yes",
-		dotfiles:  lines[4] == "yes",
+		dotfiles:  lines[3] == "yes",
 	}, nil
 }
 
@@ -271,30 +296,19 @@ func writeRemoteEnv(ctx context.Context, eng engine.Engine, st workspace.State, 
 	return putRemote(ctx, eng, st, remoteEnvPath(st), "600", data)
 }
 
-// installServer streams castra's own binary into the container once per
-// build of castra; the container's copy runs `castra server` for each session.
-func installServer(ctx context.Context, eng engine.Engine, st workspace.State, f facts, self string, log io.Writer) error {
+// installServer streams castra's own binary into the container, where it runs
+// `castra server` for each session, with its sha256 beside it. Callers skip
+// it when the container already has this build.
+func installServer(ctx context.Context, eng engine.Engine, st workspace.State, self binary, log io.Writer) error {
 	if runtime.GOOS != "linux" {
 		return errors.New("this castra build cannot run inside a Linux container; macOS support is tracked in issue #1")
 	}
-	if f.arch != runtime.GOARCH {
-		return fmt.Errorf("the container is %s and this castra is %s; mixed architectures need a release build", f.arch, runtime.GOARCH)
-	}
-	data, err := os.ReadFile(self)
-	if err != nil {
-		return err
-	}
-	sum := sha256.Sum256(data)
-	hash := hex.EncodeToString(sum[:])
-	if f.serverSum == hash {
-		return nil
-	}
 	bin := serverPath(st)
 	fmt.Fprintf(log, "castra: installing the castra server in the container (%s)\n", bin)
-	if err := putRemote(ctx, eng, st, bin, "755", data); err != nil {
+	if err := putRemote(ctx, eng, st, bin, "755", self.data); err != nil {
 		return err
 	}
-	return putRemote(ctx, eng, st, bin+".sha256", "600", []byte(hash))
+	return putRemote(ctx, eng, st, bin+".sha256", "600", []byte(self.sum))
 }
 
 func goArch(uname string) string {
@@ -306,19 +320,6 @@ func goArch(uname string) string {
 	default:
 		return uname
 	}
-}
-
-// rotateHostKey gives the container a new host key and pins its public half
-// on the host, so OpenSSH can check it with StrictHostKeyChecking on.
-func rotateHostKey(ctx context.Context, eng engine.Engine, st workspace.State, paths sshconfig.Paths) error {
-	priv, pub, err := sshconfig.NewKey("castra-host-" + st.Name)
-	if err != nil {
-		return err
-	}
-	if err := putRemote(ctx, eng, st, hostKeyPath(st), "600", priv); err != nil {
-		return err
-	}
-	return paths.PinHostKey(st, pub)
 }
 
 func firstNonEmpty(vals ...string) string {

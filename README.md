@@ -65,7 +65,7 @@ Rebuild from scratch after you change the Dockerfile or devcontainer.json:
 castra up my-project --recreate
 ```
 
-Delete a workspace when you are done with it. castra asks first (`-y` skips the question), then removes the container, its SSH host entry and pinned host key. Your folder, the images and any named volumes stay. Without a name it shows the menu.
+Delete a workspace when you are done with it. castra asks first (`-y` skips the question), then removes the container and its SSH host entry. Your folder, the images and any named volumes stay. Without a name it shows the menu.
 
 ```console
 castra delete my-project
@@ -93,13 +93,13 @@ On the first `up` of each new container, castra clones it to `~/dotfiles` inside
 ## How it works
 
 - **Building** is done by Microsoft's devcontainer CLI. Features, lifecycle commands, mounts and `runArgs` behave as the spec says.
-- **SSH** runs over `podman exec -i`. castra copies itself into the container once and runs a small SSH server there for each connection. Nothing listens on a port, on the host or in the container.
+- **SSH** runs over `podman exec -i`. castra copies itself into the container once and runs a small SSH server there for each connection. castra opens no port, on the host or in the container.
 - **Your agent** is forwarded per session. Inside a session, `SSH_AUTH_SOCK` points at a socket that exists only while the session does. Your host's socket is never mounted into the container.
-- **Host keys** are pinned. Each container gets its own host key, and OpenSSH checks it strictly. A recreated container gets a new key, and castra updates the pin.
-
+- **No keys** of castra's own, as in DevPod. The containers are on your own machine and the only way in is the engine's `exec`, so the server asks for no key and OpenSSH does not check its host key.
+- **Port forwarding** works both ways, like DevPod: `ssh -L 8080:localhost:8080 my-project.castra` reaches a server in the container, and `ssh -R` makes one of yours reachable from inside it.
 - **The environment** inside a session is the container's own, plus devcontainer.json's `remoteEnv`, plus `REMOTE_CONTAINERS=true`, `CASTRA=true` and `CASTRA_WORKSPACE=<name>`. `REMOTE_CONTAINERS` is what VS Code and DevPod set, and many dotfiles check it to know they run in a devcontainer, for example to leave `SSH_AUTH_SOCK` alone. Lifecycle commands get the same three variables.
 
-castra keeps its files in `~/.ssh/castra/` (its client key, and one Host block and one pinned host key per workspace), `~/.local/state/castra/` (one record per workspace) and `~/.config/castra/config.yaml`. The only change it makes outside those is one `Include` line at the top of `~/.ssh/config`.
+castra keeps its files in `~/.ssh/castra/` (one Host block per workspace), `~/.local/state/castra/` (one record per workspace) and `~/.config/castra/config.yaml`. The only change it makes outside those is one `Include` line at the top of `~/.ssh/config`.
 
 What the container can and cannot reach, and how to report a problem: [SECURITY.md](SECURITY.md).
 

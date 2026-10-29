@@ -1,11 +1,16 @@
 // Package server is the SSH server castra runs inside the container. It speaks
-// SSH on a single connection (stdin and stdout of `podman exec -i`), accepts one
-// client key, and forwards the client's ssh-agent for the length of a session.
+// SSH on a single connection (stdin and stdout of `podman exec -i`), forwards
+// the client's ssh-agent for the length of a session, and carries port
+// forwards both ways.
+//
+// Like DevPod's server, it asks the client for no key and makes its host key
+// fresh for every run. The access control is the engine's `exec`, which only
+// the owner of the container can run; there is no network in between.
 package server
 
 import (
-	"crypto/subtle"
-	"errors"
+	"crypto/ed25519"
+	"crypto/rand"
 	"fmt"
 	"io"
 	"log/slog"
@@ -18,11 +23,6 @@ import (
 
 // Options configures one server run.
 type Options struct {
-	// HostKey is the PEM-encoded private host key the client has pinned.
-	HostKey []byte
-	// AuthorizedKey is the one client public key allowed in, in
-	// authorized_keys format.
-	AuthorizedKey []byte
 	// Workdir is where sessions start. Falls back to the user's home.
 	Workdir string
 	// Workspace is the workspace name, exported to sessions as CASTRA_WORKSPACE.
@@ -35,9 +35,9 @@ type Options struct {
 }
 
 // Serve runs the SSH protocol on conn until the client disconnects and every
-// session has ended.
+// session has ended. Remote forwards the client asked for close with it.
 func Serve(conn net.Conn, opts Options) error {
-	cfg, err := serverConfig(opts)
+	cfg, err := serverConfig()
 	if err != nil {
 		return err
 	}
@@ -51,49 +51,49 @@ func Serve(conn net.Conn, opts Options) error {
 		return fmt.Errorf("ssh handshake: %w", err)
 	}
 	defer sconn.Close()
-	go ssh.DiscardRequests(reqs)
+	fwd := newForwards(sconn, log)
+	defer fwd.closeAll()
+	go fwd.serve(reqs)
 
 	var wg sync.WaitGroup
 	for nc := range chans {
-		if nc.ChannelType() != "session" {
-			_ = nc.Reject(ssh.UnknownChannelType, "castra serves session channels only")
-			continue
+		switch nc.ChannelType() {
+		case "session":
+			ch, chReqs, err := nc.Accept()
+			if err != nil {
+				log.Warn("accept channel", "err", err)
+				continue
+			}
+			s := &session{conn: sconn, ch: ch, workdir: opts.Workdir, workspace: opts.Workspace, remoteEnv: opts.RemoteEnv, log: log}
+			wg.Add(1)
+			go func() {
+				defer wg.Done()
+				s.serve(chReqs)
+			}()
+		case "direct-tcpip":
+			go fwd.local(nc, "tcp")
+		case "direct-streamlocal@openssh.com":
+			go fwd.local(nc, "unix")
+		default:
+			_ = nc.Reject(ssh.UnknownChannelType, "castra does not serve "+nc.ChannelType()+" channels")
 		}
-		ch, chReqs, err := nc.Accept()
-		if err != nil {
-			log.Warn("accept channel", "err", err)
-			continue
-		}
-		s := &session{conn: sconn, ch: ch, workdir: opts.Workdir, workspace: opts.Workspace, remoteEnv: opts.RemoteEnv, log: log}
-		wg.Add(1)
-		go func() {
-			defer wg.Done()
-			s.serve(chReqs)
-		}()
 	}
 	wg.Wait()
 	return nil
 }
 
-func serverConfig(opts Options) (*ssh.ServerConfig, error) {
-	signer, err := ssh.ParsePrivateKey(opts.HostKey)
+// serverConfig lets any client in, as DevPod's server does when started
+// without authorized keys, with an ed25519 host key made for this run.
+func serverConfig() (*ssh.ServerConfig, error) {
+	_, priv, err := ed25519.GenerateKey(rand.Reader)
 	if err != nil {
-		return nil, fmt.Errorf("parse host key: %w", err)
+		return nil, err
 	}
-	allowed, _, _, _, err := ssh.ParseAuthorizedKey(opts.AuthorizedKey)
+	signer, err := ssh.NewSignerFromKey(priv)
 	if err != nil {
-		return nil, fmt.Errorf("parse authorized key: %w", err)
+		return nil, err
 	}
-	want := allowed.Marshal()
-	cfg := &ssh.ServerConfig{
-		ServerVersion: "SSH-2.0-castra",
-		PublicKeyCallback: func(_ ssh.ConnMetadata, key ssh.PublicKey) (*ssh.Permissions, error) {
-			if subtle.ConstantTimeCompare(key.Marshal(), want) == 1 {
-				return &ssh.Permissions{}, nil
-			}
-			return nil, errors.New("key not authorized")
-		},
-	}
+	cfg := &ssh.ServerConfig{ServerVersion: "SSH-2.0-castra", NoClientAuth: true}
 	cfg.AddHostKey(signer)
 	return cfg, nil
 }

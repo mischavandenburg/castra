@@ -37,6 +37,16 @@ with your ssh-agent forwarded for the length of each session. Nothing listens on
 Roman legions built the same camp at every stop. castra builds the same container every time.`,
 		SilenceUsage:  true,
 		SilenceErrors: true,
+		// The commands that write castra's SSH files or connect through them
+		// first bring files from an older castra build to this layout, so an
+		// upgrade never meets a Host block the new server cannot satisfy.
+		PersistentPreRunE: func(cmd *cobra.Command, _ []string) error {
+			switch cmd.Name() {
+			case "up", "ssh", "proxy", "delete":
+				return migrate()
+			}
+			return nil
+		},
 	}
 	root.AddCommand(
 		newUpCmd(),

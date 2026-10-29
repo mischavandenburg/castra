@@ -396,11 +396,7 @@ func (s *session) relayAgent(local net.Conn) {
 	}
 	defer s.untrack(local, remote)
 	go ssh.DiscardRequests(reqs)
-	go func() {
-		_, _ = io.Copy(remote, local)
-		_ = remote.CloseWrite()
-	}()
-	_, _ = io.Copy(local, remote)
+	join(remote, local)
 }
 
 func (s *session) track(conns ...io.Closer) bool {

@@ -20,42 +20,25 @@ import (
 	"github.com/pkg/sftp"
 	"golang.org/x/crypto/ssh"
 	"golang.org/x/crypto/ssh/agent"
-
-	"github.com/mischavandenburg/castra/internal/sshconfig"
 )
 
 type harness struct {
-	client    *ssh.Client
-	clientKey ssh.Signer
-	workdir   string
+	client  *ssh.Client
+	workdir string
 }
 
 // start runs the server on one loopback connection (net.Pipe deadlocks the
 // SSH version exchange, which both sides write at once) and dials it with
-// the x/crypto client.
-func start(t *testing.T, dialKey ssh.Signer) (*harness, error) {
+// the x/crypto client the way OpenSSH reaches castra: no key, and the host
+// key not checked.
+func start(t *testing.T) (*harness, error) {
 	t.Helper()
-	return startServer(t, dialKey, nil)
+	return startWith(t, nil)
 }
 
 func startWith(t *testing.T, remoteEnv map[string]*string) (*harness, error) {
 	t.Helper()
-	return startServer(t, nil, remoteEnv)
-}
-
-func startServer(t *testing.T, dialKey ssh.Signer, remoteEnv map[string]*string) (*harness, error) {
-	t.Helper()
-	hostPEM, hostPub, err := sshconfig.NewKey("test-host")
-	if err != nil {
-		t.Fatal(err)
-	}
-	_, clientPriv, _ := ed25519.GenerateKey(rand.Reader)
-	clientSigner, _ := ssh.NewSignerFromKey(clientPriv)
-	if dialKey == nil {
-		dialKey = clientSigner
-	}
 	workdir := t.TempDir()
-
 	ln, err := net.Listen("tcp", "127.0.0.1:0")
 	if err != nil {
 		t.Fatal(err)
@@ -66,30 +49,36 @@ func startServer(t *testing.T, dialKey ssh.Signer, remoteEnv map[string]*string)
 		if err != nil {
 			return
 		}
-		_ = Serve(c, Options{
-			HostKey:       hostPEM,
-			AuthorizedKey: ssh.MarshalAuthorizedKey(clientSigner.PublicKey()),
-			Workdir:       workdir,
-			Workspace:     "demo",
-			RemoteEnv:     remoteEnv,
-		})
+		_ = Serve(c, Options{Workdir: workdir, Workspace: "demo", RemoteEnv: remoteEnv})
 	}()
 
 	client, err := ssh.Dial("tcp", ln.Addr().String(), &ssh.ClientConfig{
 		User:            "test",
-		Auth:            []ssh.AuthMethod{ssh.PublicKeys(dialKey)},
-		HostKeyCallback: ssh.FixedHostKey(hostPub),
+		HostKeyCallback: ssh.InsecureIgnoreHostKey(),
 		Timeout:         5 * time.Second,
 	})
 	if err != nil {
 		return nil, err
 	}
 	t.Cleanup(func() { client.Close() })
-	return &harness{client: client, clientKey: clientSigner, workdir: workdir}, nil
+	return &harness{client: client, workdir: workdir}, nil
+}
+
+// TestAnyClientGetsIn: like DevPod's server, castra's asks for no key; the
+// engine's exec is the access control.
+func TestAnyClientGetsIn(t *testing.T) {
+	h, err := start(t)
+	if err != nil {
+		t.Fatalf("a client with no key was refused: %v", err)
+	}
+	s, _ := h.client.NewSession()
+	if out, err := s.Output("echo in"); err != nil || string(out) != "in\n" {
+		t.Fatalf("got %q, %v", out, err)
+	}
 }
 
 func TestExecOutputAndExitStatus(t *testing.T) {
-	h, err := start(t, nil)
+	h, err := start(t)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -110,7 +99,7 @@ func TestExecOutputAndExitStatus(t *testing.T) {
 func TestDevcontainerMarkers(t *testing.T) {
 	t.Setenv("REMOTE_CONTAINERS", "")
 	os.Unsetenv("REMOTE_CONTAINERS")
-	h, err := start(t, nil)
+	h, err := start(t)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -142,7 +131,7 @@ func TestRemoteEnvAppliesAndUnsets(t *testing.T) {
 
 func TestContainerEnvWinsOverMarkers(t *testing.T) {
 	t.Setenv("REMOTE_CONTAINERS", "set-by-the-container")
-	h, err := start(t, nil)
+	h, err := start(t)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -154,7 +143,7 @@ func TestContainerEnvWinsOverMarkers(t *testing.T) {
 }
 
 func TestStdinReachesCommand(t *testing.T) {
-	h, err := start(t, nil)
+	h, err := start(t)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -166,16 +155,8 @@ func TestStdinReachesCommand(t *testing.T) {
 	}
 }
 
-func TestRejectsUnknownKey(t *testing.T) {
-	_, other, _ := ed25519.GenerateKey(rand.Reader)
-	otherSigner, _ := ssh.NewSignerFromKey(other)
-	if _, err := start(t, otherSigner); err == nil {
-		t.Fatal("a key that is not the authorized one got in")
-	}
-}
-
 func TestPTY(t *testing.T) {
-	h, err := start(t, nil)
+	h, err := start(t)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -195,7 +176,7 @@ func TestPTY(t *testing.T) {
 }
 
 func TestWindowChangeReachesTerminal(t *testing.T) {
-	h, err := start(t, nil)
+	h, err := start(t)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -222,7 +203,7 @@ func TestWindowChangeReachesTerminal(t *testing.T) {
 // TestAgentForwarding lists a key through the forwarded socket while the
 // session is alive, then checks the socket is gone once the session ends.
 func TestAgentForwarding(t *testing.T) {
-	h, err := start(t, nil)
+	h, err := start(t)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -283,7 +264,7 @@ func TestAgentForwarding(t *testing.T) {
 // forwarded socket while the session ran loses the agent when the session
 // ends, even if it never lets go of its connection.
 func TestAgentConnectionsCloseWithSession(t *testing.T) {
-	h, err := start(t, nil)
+	h, err := start(t)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -325,7 +306,7 @@ func TestAgentConnectionsCloseWithSession(t *testing.T) {
 // TestHangUpOnDisconnect: a program whose client goes away gets SIGHUP from
 // the server, the way a terminal hangup would send it.
 func TestHangUpOnDisconnect(t *testing.T) {
-	h, err := start(t, nil)
+	h, err := start(t)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -367,7 +348,7 @@ func waitFor(t *testing.T, cond func() bool, what string, args ...any) {
 }
 
 func TestSessionWithoutAgentHasNoSocket(t *testing.T) {
-	h, err := start(t, nil)
+	h, err := start(t)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -382,7 +363,7 @@ func TestSessionWithoutAgentHasNoSocket(t *testing.T) {
 // TestSFTP copies a file over the sftp subsystem and requires the exit status
 // OpenSSH's scp waits for; without it scp exits 1 even though the copy landed.
 func TestSFTP(t *testing.T) {
-	h, err := start(t, nil)
+	h, err := start(t)
 	if err != nil {
 		t.Fatal(err)
 	}
