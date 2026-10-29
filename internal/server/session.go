@@ -32,7 +32,6 @@ type session struct {
 	workspace string
 	remoteEnv map[string]*string
 	log       *slog.Logger
-	gone      <-chan struct{} // closed when the client connection ends
 
 	mu      sync.Mutex
 	env     []string
@@ -40,6 +39,8 @@ type session struct {
 	ptmx    *os.File
 	proc    *os.Process
 	started bool
+	exited  bool // the program has been waited for; its pgid may be reused
+	hungUp  bool // the channel ended; a program recorded after this is signalled at once
 
 	agentDir   string
 	agentLn    net.Listener
@@ -64,6 +65,7 @@ type windowChange struct {
 
 func (s *session) serve(reqs <-chan *ssh.Request) {
 	defer s.cleanup()
+	defer s.hangUp()
 	for req := range reqs {
 		switch req.Type {
 		case "env":
@@ -193,7 +195,7 @@ func (s *session) runPTY(cmd *exec.Cmd) error {
 	ptmx, err := pty.StartWithSize(cmd, ws)
 	if err == nil {
 		s.ptmx = ptmx
-		s.proc = cmd.Process
+		s.record(cmd.Process)
 	}
 	s.mu.Unlock()
 	if err != nil {
@@ -206,11 +208,8 @@ func (s *session) runPTY(cmd *exec.Cmd) error {
 		_, _ = io.Copy(s.ch, ptmx) // ends with EIO once the process side closes
 		close(output)
 	}()
-	exited := make(chan struct{})
-	go s.hangUpWhenGone(cmd.Process, exited)
 
-	err = cmd.Wait()
-	close(exited)
+	err = s.wait(cmd)
 	select {
 	case <-output:
 	case <-time.After(2 * time.Second): // a background job still holds the terminal
@@ -234,27 +233,44 @@ func (s *session) runPlain(cmd *exec.Cmd) error {
 		return err
 	}
 	s.mu.Lock()
-	s.proc = cmd.Process
+	s.record(cmd.Process)
 	s.mu.Unlock()
 	go func() {
 		_, _ = io.Copy(stdin, s.ch)
 		_ = stdin.Close()
 	}()
-	exited := make(chan struct{})
-	go s.hangUpWhenGone(cmd.Process, exited)
-	err = cmd.Wait()
-	close(exited)
+	return s.wait(cmd)
+}
+
+// record keeps the running program for signals. The client can be gone
+// before Start even returns (the program may have printed already), so a
+// hang-up that arrived first is delivered here. Called with s.mu held.
+func (s *session) record(p *os.Process) {
+	s.proc = p
+	if s.hungUp {
+		_ = syscall.Kill(-p.Pid, syscall.SIGHUP)
+	}
+}
+
+// wait reaps the program and records that its process group id is free.
+func (s *session) wait(cmd *exec.Cmd) error {
+	err := cmd.Wait()
+	s.mu.Lock()
+	s.exited = true
+	s.mu.Unlock()
 	return err
 }
 
-// hangUpWhenGone sends SIGHUP to the session's process group when the client
-// connection drops, the way a terminal hangup would. It stops watching once
-// the process has exited, so a reused process group id is never signalled.
-func (s *session) hangUpWhenGone(p *os.Process, exited <-chan struct{}) {
-	select {
-	case <-s.gone:
-		_ = syscall.Kill(-p.Pid, syscall.SIGHUP)
-	case <-exited:
+// hangUp sends SIGHUP to the session's process group when the channel ended
+// before the program did (the client went away), the way a terminal hangup
+// would. It runs before the server can exit, so no program is left behind,
+// and never signals a group whose program has already been reaped.
+func (s *session) hangUp() {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.hungUp = true
+	if s.proc != nil && !s.exited {
+		_ = syscall.Kill(-s.proc.Pid, syscall.SIGHUP)
 	}
 }
 

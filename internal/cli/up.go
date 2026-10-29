@@ -123,10 +123,11 @@ func up(ctx context.Context, target string, f upFlags, log io.Writer) (workspace
 	}
 
 	fmt.Fprintf(log, "castra: pitching camp for %s from %s with %s\n", name, folder, eng.Name)
-	// Ctrl-C while the devcontainer CLI builds cancels this context, and Up
-	// then ends the CLI's whole process group. Everywhere else castra dies on
-	// the signal the ordinary way.
-	buildCtx, stop := signal.NotifyContext(ctx, os.Interrupt, syscall.SIGTERM)
+	// Ctrl-C, SIGTERM or a closed terminal while the devcontainer CLI builds
+	// cancels this context, and Up then ends the CLI's whole process group
+	// (it is in its own group, so the signal alone would not reach it).
+	// Everywhere else castra dies on the signal the ordinary way.
+	buildCtx, stop := signal.NotifyContext(ctx, os.Interrupt, syscall.SIGTERM, syscall.SIGHUP)
 	res, err := devcontainer.Up(buildCtx, devcontainer.UpOptions{
 		CLI: cli.Path, EnginePath: eng.Path, Folder: folder, Name: name, Recreate: f.recreate, Stderr: log,
 	})

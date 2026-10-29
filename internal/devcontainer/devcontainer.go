@@ -233,6 +233,9 @@ func Up(ctx context.Context, opts UpOptions) (Result, error) {
 		if opts.Stderr != nil {
 			fmt.Fprintf(opts.Stderr, "castra: the devcontainer CLI printed its result but did not exit within %s; continuing\n", grace)
 		}
+	case <-ctx.Done():
+		terminate(cmd, results)
+		return Result{}, ctx.Err()
 	}
 	if res.Outcome != "success" {
 		return res, fmt.Errorf("devcontainer up failed: %s %s", res.Message, res.Description)

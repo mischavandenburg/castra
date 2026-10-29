@@ -9,8 +9,11 @@ import (
 	"io"
 	"net"
 	"os"
+	"os/exec"
 	"path/filepath"
+	"strconv"
 	"strings"
+	"syscall"
 	"testing"
 	"time"
 
@@ -316,6 +319,50 @@ func TestAgentConnectionsCloseWithSession(t *testing.T) {
 	_ = held.SetDeadline(time.Now().Add(3 * time.Second))
 	if keys, err := agent.NewClient(held).List(); err == nil {
 		t.Fatalf("the held connection still lists %d key(s) after the session ended", len(keys))
+	}
+}
+
+// TestHangUpOnDisconnect: a program whose client goes away gets SIGHUP from
+// the server, the way a terminal hangup would send it.
+func TestHangUpOnDisconnect(t *testing.T) {
+	h, err := start(t, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	s, _ := h.client.NewSession()
+	stdout, _ := s.StdoutPipe()
+	if err := s.Start(`echo $$; exec sleep 30`); err != nil {
+		t.Fatal(err)
+	}
+	line, err := bufio.NewReader(stdout).ReadString('\n')
+	if err != nil {
+		t.Fatal(err)
+	}
+	pid, err := strconv.Atoi(strings.TrimSpace(line))
+	if err != nil {
+		t.Fatalf("pid line %q", line)
+	}
+	// Disconnect only once the shell has become sleep. A shell such as zsh
+	// catches SIGHUP itself, and one that lands between `echo` and `exec` is
+	// lost with the shell; that race is the shell's, not castra's.
+	waitFor(t, func() bool {
+		comm, _ := exec.Command("ps", "-o", "comm=", "-p", strconv.Itoa(pid)).Output()
+		return strings.HasSuffix(strings.TrimSpace(string(comm)), "sleep")
+	}, "pid %d to become sleep", pid)
+	_ = h.client.Close() // the client is gone, mid-command
+	waitFor(t, func() bool { return syscall.Kill(pid, 0) != nil }, "sleep %d to end after its client disconnected", pid)
+}
+
+// waitFor polls cond for up to five seconds; on timeout it fails the test
+// with the description.
+func waitFor(t *testing.T, cond func() bool, what string, args ...any) {
+	t.Helper()
+	deadline := time.Now().Add(5 * time.Second)
+	for !cond() {
+		if time.Now().After(deadline) {
+			t.Fatalf("timed out waiting for "+what, args...)
+		}
+		time.Sleep(20 * time.Millisecond)
 	}
 }
 

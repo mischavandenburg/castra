@@ -53,12 +53,6 @@ func Serve(conn net.Conn, opts Options) error {
 	defer sconn.Close()
 	go ssh.DiscardRequests(reqs)
 
-	gone := make(chan struct{})
-	go func() {
-		_ = sconn.Wait()
-		close(gone)
-	}()
-
 	var wg sync.WaitGroup
 	for nc := range chans {
 		if nc.ChannelType() != "session" {
@@ -70,7 +64,7 @@ func Serve(conn net.Conn, opts Options) error {
 			log.Warn("accept channel", "err", err)
 			continue
 		}
-		s := &session{conn: sconn, ch: ch, workdir: opts.Workdir, workspace: opts.Workspace, remoteEnv: opts.RemoteEnv, log: log, gone: gone}
+		s := &session{conn: sconn, ch: ch, workdir: opts.Workdir, workspace: opts.Workspace, remoteEnv: opts.RemoteEnv, log: log}
 		wg.Add(1)
 		go func() {
 			defer wg.Done()
