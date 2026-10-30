@@ -96,6 +96,8 @@ dotfiles:
 
 On the first `up` of each new container, castra clones it to `~/dotfiles` inside the container and runs the first of `install.sh`, `install`, `bootstrap.sh`, `bootstrap`, `setup.sh`, `setup` it finds. The clone goes over SSH with your forwarded agent, so a private repository works without copying any key into the container. Set `dotfiles.install` to run a different command instead.
 
+`castra config show` prints the settings in your config file, and `castra config path` prints where that file is.
+
 ## How it works
 
 - **Building** is done by Microsoft's devcontainer CLI. Features, lifecycle commands, mounts and `runArgs` behave as the spec says.

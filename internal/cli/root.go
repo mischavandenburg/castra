@@ -59,6 +59,7 @@ Roman legions built the same camp at every stop. castra builds the same containe
 		newStopCmd(),
 		newDeleteCmd(),
 		newDoctorCmd(),
+		newConfigCmd(),
 		newVersionCmd(),
 		newProxyCmd(),
 		newServerCmd(),
