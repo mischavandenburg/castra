@@ -81,9 +81,9 @@ func recordPath(name string) (string, error) {
 	return filepath.Join(dir, "workspaces", name+".json"), nil
 }
 
-// Lock serializes `up` and `delete` on one workspace. Lock files are never
-// removed: a run waiting on an unlinked file would get a lock nobody else can
-// see, so they stay in the state directory, empty.
+// Lock serializes `up`, `stop` and `delete` on one workspace. Lock files are
+// never removed: a run waiting on an unlinked file would get a lock nobody
+// else can see, so they stay in the state directory, empty.
 func Lock(name string) (*lock.Lock, error) {
 	dir, err := StateDir()
 	if err != nil {

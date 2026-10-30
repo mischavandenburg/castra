@@ -29,8 +29,9 @@ func Version() string {
 
 func newRootCmd() *cobra.Command {
 	root := &cobra.Command{
-		Use:   "castra",
-		Short: "Devcontainers on Podman or Docker, reached over SSH with your agent forwarded",
+		Use:     "castra",
+		Short:   "Devcontainers on Podman or Docker, reached over SSH with your agent forwarded",
+		Version: Version(),
 		Long: `castra builds a devcontainer from a folder's .devcontainer and lets you in over SSH,
 with your ssh-agent forwarded for the length of each session. Nothing listens on a port.
 
@@ -48,10 +49,14 @@ Roman legions built the same camp at every stop. castra builds the same containe
 			return nil
 		},
 	}
+	// --version must print what `castra version` prints; cobra's own template
+	// would read "castra version dev".
+	root.SetVersionTemplate("castra {{.Version}}\n")
 	root.AddCommand(
 		newUpCmd(),
 		newSSHCmd(),
 		newListCmd(),
+		newStopCmd(),
 		newDeleteCmd(),
 		newDoctorCmd(),
 		newVersionCmd(),

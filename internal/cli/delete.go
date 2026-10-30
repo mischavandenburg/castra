@@ -21,7 +21,7 @@ func newDeleteCmd() *cobra.Command {
 		Use:     "delete [workspace]",
 		Aliases: []string{"rm"},
 		Short:   "Remove a workspace's container and castra's records of it (castra movere: break camp)",
-		Long: `Remove a workspace's container, its SSH host entry and pinned host key, and castra's record of it.
+		Long: `Remove a workspace's container, its SSH host entry, and castra's record of it.
 Your folder, the images and any named volumes stay. Without a name, castra shows a menu.`,
 		Args: cobra.MaximumNArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {

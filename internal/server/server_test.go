@@ -96,9 +96,13 @@ func TestExecOutputAndExitStatus(t *testing.T) {
 
 // TestDevcontainerMarkers: dotfiles test REMOTE_CONTAINERS to know they are in
 // a devcontainer; without it a common setup replaces the forwarded agent.
+// Clear all three because inside a castra container they are already set, and
+// those inherited values would win over the test server's markers.
 func TestDevcontainerMarkers(t *testing.T) {
-	t.Setenv("REMOTE_CONTAINERS", "")
-	os.Unsetenv("REMOTE_CONTAINERS")
+	for _, k := range []string{"REMOTE_CONTAINERS", "CASTRA", "CASTRA_WORKSPACE"} {
+		t.Setenv(k, "")
+		os.Unsetenv(k)
+	}
 	h, err := start(t)
 	if err != nil {
 		t.Fatal(err)

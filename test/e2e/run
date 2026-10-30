@@ -192,7 +192,20 @@ check "second up took under 15 s ($took s)" test "$took" -lt 15
 other=docker; [ "$engine" = docker ] && other=podman
 refute "switching engines is refused" "$CASTRA" up "$dir" --engine "$other" </dev/null
 
-# recreate: a new container, create hooks rerun, the pin rotated
+# stop: the container stops but stays, and up starts the same one again
+started="$(in_ws cat /tmp/castra-started)"
+check "castra stop" "$CASTRA" stop "$name" </dev/null
+expect "container is stopped" false "$("$engine" inspect --format '{{.State.Running}}' "$ctr")"
+out="$("$CASTRA" stop "$name" </dev/null 2>&1)"; rc=$?
+expect "second stop exits 0" 0 "$rc"
+check "second stop says it is already stopped" grep -q "already stopped" <<<"$out"
+check "castra up after stop" "$CASTRA" up "$dir" --engine "$engine" --dotfiles /mnt/fixture/dotfiles.git </dev/null
+expect "up after stop keeps the container" "$ctr" "$(ctr_id)"
+restarted="$(in_ws cat /tmp/castra-started)"
+check "postStartCommand ran again after stop" test -n "$restarted" -a "$restarted" != "$started"
+expect "postCreateCommand did not run again after stop" "$created" "$(in_ws cat /tmp/castra-created)"
+
+# recreate: a new container, create hooks rerun
 check "castra up --recreate" "$CASTRA" up "$dir" --engine "$engine" --dotfiles /mnt/fixture/dotfiles.git --recreate </dev/null
 new="$(ctr_id)"
 check "recreate changed the container id" test "$new" != "$ctr" -a -n "$new"

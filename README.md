@@ -65,6 +65,12 @@ Rebuild from scratch after you change the Dockerfile or devcontainer.json:
 castra up my-project --recreate
 ```
 
+Stop a workspace's container when you are done for now. Open sessions end; nothing is rebuilt: `castra up` or `castra ssh` starts the same container again. Without a name it shows the menu.
+
+```console
+castra stop my-project
+```
+
 Delete a workspace when you are done with it. castra asks first (`-y` skips the question), then removes the container and its SSH host entry. Your folder, the images and any named volumes stay. Without a name it shows the menu.
 
 ```console
@@ -105,7 +111,7 @@ What the container can and cannot reach, and how to report a problem: [SECURITY.
 
 ## Testing
 
-`go test -race ./...` runs the unit tests, which include the SSH server against a real client, the dotfiles script under `sh`, and the quoting that stands between devcontainer.json and the shell. `test/e2e/run --engine podman` (or `docker`) runs the whole surface against the fixture in `test/fixtures/e2e` on a machine with the engine installed: up, ssh, the forwarded agent, scp, dotfiles, recreate and delete. It uses a throwaway ssh-agent and cleans up after itself.
+`go test -race ./...` runs the unit tests, which include the SSH server against a real client, the dotfiles script under `sh`, and the quoting that stands between devcontainer.json and the shell. `test/e2e/run --engine podman` (or `docker`) runs the whole surface against the fixture in `test/fixtures/e2e` on a machine with the engine installed: up, ssh, the forwarded agent, scp, dotfiles, stop, recreate and delete. It uses a throwaway ssh-agent and cleans up after itself.
 
 ## Podman or Docker
 

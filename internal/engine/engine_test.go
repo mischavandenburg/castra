@@ -2,6 +2,7 @@ package engine
 
 import (
 	"context"
+	"errors"
 	"os"
 	"path/filepath"
 	"strings"
@@ -54,6 +55,96 @@ func TestRemoveRefusesWhenTheEngineIsDown(t *testing.T) {
 	}
 	if err := (Engine{Name: "docker", Path: gone}).Remove(context.Background(), "abc"); err != nil {
 		t.Fatalf("Remove of a missing container = %v, want nil", err)
+	}
+}
+
+// TestStopRefusesWhenTheEngineIsDown: an engine that cannot be asked is an
+// error, never a success, just as for Remove.
+func TestStopRefusesWhenTheEngineIsDown(t *testing.T) {
+	dir := t.TempDir()
+	fake := filepath.Join(dir, "podman")
+	if err := os.WriteFile(fake, []byte("#!/bin/sh\necho 'cannot connect to the engine' >&2; exit 125\n"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	e := Engine{Name: "podman", Path: fake}
+	if stopped, err := e.Stop(context.Background(), "abc"); err == nil || stopped || !strings.Contains(err.Error(), "cannot connect") {
+		t.Fatalf("Stop with the engine down = %v, %v, want its error", stopped, err)
+	}
+}
+
+// TestStopOfAMissingContainerSaysToRunUp: a container castra can no longer
+// find is an error, not a quiet success.
+func TestStopOfAMissingContainerSaysToRunUp(t *testing.T) {
+	dir := t.TempDir()
+	fake := filepath.Join(dir, "docker")
+	if err := os.WriteFile(fake, []byte("#!/bin/sh\necho 'Error: No such container: abc' >&2; exit 1\n"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	e := Engine{Name: "docker", Path: fake}
+	if stopped, err := e.Stop(context.Background(), "abc"); err == nil || stopped || !strings.Contains(err.Error(), "castra up") {
+		t.Fatalf("Stop of a missing container = %v, %v, want an error naming `castra up`", stopped, err)
+	}
+}
+
+// TestRunningOfAMissingContainerNamesIt: a caller that passes inspect's
+// error through still learns which container the engine could not find.
+func TestRunningOfAMissingContainerNamesIt(t *testing.T) {
+	dir := t.TempDir()
+	fake := filepath.Join(dir, "docker")
+	if err := os.WriteFile(fake, []byte("#!/bin/sh\necho 'Error: No such container: abc' >&2; exit 1\n"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	e := Engine{Name: "docker", Path: fake}
+	id := "485830b0b7e9f00dbadc0ffee"
+	running, err := e.Running(context.Background(), id)
+	if running || err == nil || !errors.Is(err, errNoSuchContainer) || !strings.Contains(err.Error(), ShortID(id)) {
+		t.Fatalf("Running of a missing container = %v, %v, want an error naming %s", running, err, ShortID(id))
+	}
+}
+
+// TestStopStopsARunningContainer pins the stop shape: ten seconds, then the
+// container id.
+func TestStopStopsARunningContainer(t *testing.T) {
+	dir := t.TempDir()
+	fake := filepath.Join(dir, "podman")
+	script := "#!/bin/sh\ncase \"$*\" in\n*inspect*) echo running ;;\n\"stop -t 10 abc\") exit 0 ;;\n*) exit 1 ;;\nesac\n"
+	if err := os.WriteFile(fake, []byte(script), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	e := Engine{Name: "podman", Path: fake}
+	if stopped, err := e.Stop(context.Background(), "abc"); err != nil || !stopped {
+		t.Fatalf("Stop of a running container = %v, %v, want stopped", stopped, err)
+	}
+}
+
+// TestStopLeavesAnExitedContainerAlone: leaving already stopped is success,
+// and castra does not call stop again.
+func TestStopLeavesAnExitedContainerAlone(t *testing.T) {
+	dir := t.TempDir()
+	fake := filepath.Join(dir, "docker")
+	script := "#!/bin/sh\ncase \"$*\" in\n*inspect*) echo exited ;;\n*) exit 1 ;;\nesac\n"
+	if err := os.WriteFile(fake, []byte(script), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	e := Engine{Name: "docker", Path: fake}
+	if stopped, err := e.Stop(context.Background(), "abc"); err != nil || stopped {
+		t.Fatalf("Stop of an exited container = %v, %v, want not stopped and no error", stopped, err)
+	}
+}
+
+// TestStopOfAPausedContainerSaysToUnpause: podman reports a paused container
+// as not running, and its stop leaves it frozen, so castra refuses instead of
+// claiming it stopped.
+func TestStopOfAPausedContainerSaysToUnpause(t *testing.T) {
+	dir := t.TempDir()
+	fake := filepath.Join(dir, "podman")
+	script := "#!/bin/sh\ncase \"$*\" in\n*inspect*) echo paused ;;\n*) exit 1 ;;\nesac\n"
+	if err := os.WriteFile(fake, []byte(script), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	e := Engine{Name: "podman", Path: fake}
+	if stopped, err := e.Stop(context.Background(), "abc"); err == nil || stopped || !strings.Contains(err.Error(), "podman unpause abc") {
+		t.Fatalf("Stop of a paused container = %v, %v, want an error naming unpause", stopped, err)
 	}
 }
 
