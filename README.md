@@ -1,9 +1,9 @@
 # castra
 
 <p align="center">
-  <img src="docs/castra-plan.png" width="420" alt="Plan of a Roman marching camp after Polybius: walls, four gates, two crossing streets, and every unit in its fixed place">
+  <img src="docs/castra-camp.jpg" alt="A Roman marching camp seen from above: a palisade and ditch with four gates, two crossing streets, the commander's tent at the head, and every unit's tents in their fixed rows">
 </p>
-<p align="center"><sub>The plan every Roman marching camp was built to, after Polybius. Image: <a href="https://commons.wikimedia.org/wiki/File:Marschlager_nach_Polybios.png">Mediatus</a>, <a href="https://creativecommons.org/licenses/by-sa/3.0/">CC BY-SA 3.0</a>, via Wikimedia Commons, unmodified.</sub></p>
+<p align="center"><sub>A Roman marching camp, built to the plan Polybius describes.</sub></p>
 
 *Castra* is Latin for the camp a Roman legion built at the end of every day's march and tore down again the next morning. It was built to one plan and looked the same every time, so every soldier knew exactly where his tent was (Polybius, *Histories* 6.41). castra does the same for your devcontainer.
 
@@ -152,4 +152,4 @@ The devcontainer.json work is done by Microsoft's [devcontainer CLI](https://git
 
 ## License
 
-castra is licensed under the [Apache License 2.0](LICENSE). Anyone who redistributes it keeps the [NOTICE](NOTICE) file, which carries the DevPod credit. The camp plan image is the one exception: it is CC BY-SA 3.0, credited under it at the top.
+castra is licensed under the [Apache License 2.0](LICENSE). Anyone who redistributes it keeps the [NOTICE](NOTICE) file, which carries the DevPod credit.
