@@ -17,19 +17,34 @@ castra builds a devcontainer from your project's `.devcontainer` folder, runs it
 
 ## Install
 
-You need four things: Go 1.26 or newer, Podman (or Docker), the OpenSSH client, and Microsoft's [devcontainer CLI](https://github.com/devcontainers/cli) on your `PATH`. castra uses that CLI for all the devcontainer.json work and does not install it for you, so you update it the same way you update your other tools.
+You need Podman (or Docker), the OpenSSH client, and Microsoft's [devcontainer CLI](https://github.com/devcontainers/cli) on your `PATH`. castra uses that CLI for all the devcontainer.json work and does not install it for you, so you update it the same way you update your other tools.
+
+castra itself is one static binary, released for Linux on amd64 and arm64 ([releases](https://github.com/mischavandenburg/castra/releases)). macOS comes later.
 
 With [mise](https://mise.jdx.dev):
 
 ```console
 mise use -g node@lts npm:@devcontainers/cli
-go install github.com/mischavandenburg/castra@latest
+mise use -g github:mischavandenburg/castra
 castra doctor
 ```
 
-Without mise, install the CLI with npm instead: `npm install -g @devcontainers/cli`.
+mise picks your machine's archive and checks its checksum and build provenance. `mise up` upgrades castra and the CLI.
 
-`castra doctor` checks everything castra needs. Every `castra up` checks the CLI first: if it is missing, does not run, or is older than 0.89.0 (the oldest release castra is verified with), castra stops and tells you the command that fixes it. Upgrading is `mise up npm:@devcontainers/cli`.
+Without mise, install the CLI with npm instead (`npm install -g @devcontainers/cli`), download your archive from the releases page, and put its `castra` binary on your `PATH`. To check a download:
+
+```console
+sha256sum --check --ignore-missing checksums.txt
+gh attestation verify castra_0.1.0_linux_amd64.tar.gz --repo mischavandenburg/castra
+```
+
+Building from source needs Go 1.26 or newer and `CGO_ENABLED=0`: castra copies itself into your containers, and only a static binary runs in every image.
+
+```console
+CGO_ENABLED=0 go install github.com/mischavandenburg/castra@latest
+```
+
+`castra doctor` checks everything castra needs. Every `castra up` checks the CLI first: if it is missing, does not run, or is older than 0.89.0 (the oldest release castra is verified with), castra stops and tells you the command that fixes it. Upgrading is `mise up`.
 
 ## Use
 
