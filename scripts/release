@@ -12,6 +12,11 @@
 # Usage: scripts/release vX.Y.Z[-pre] [outdir]   (outdir defaults to dist)
 set -euo pipefail
 
+# The caller's Go environment must not change the binaries: an environment
+# variable that is set, even to empty, wins over go env -w settings.
+unset CDPATH
+export GOWORK=off GOFLAGS='' GOEXPERIMENT='' GOAMD64=v1 GOARM64=v8.0 LC_ALL=C
+
 usage() {
   echo "usage: scripts/release vX.Y.Z[-pre] [outdir]" >&2
   exit 2
@@ -27,7 +32,8 @@ if [ "$#" -lt 1 ] || [ "$#" -gt 2 ]; then
 fi
 version=$1
 outdir=${2:-dist}
-if [[ ! $version =~ ^v[0-9]+\.[0-9]+\.[0-9]+(-[0-9A-Za-z.]+)?$ ]]; then
+semver_re='^v(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)(-(0|[1-9][0-9]*|[0-9]*[A-Za-z-][0-9A-Za-z-]*)(\.(0|[1-9][0-9]*|[0-9]*[A-Za-z-][0-9A-Za-z-]*))*)?$'
+if [[ ! $version =~ $semver_re ]]; then
   usage
 fi
 
@@ -64,10 +70,19 @@ esac
 hostos=$(go env GOHOSTOS)
 hostarch=$(go env GOHOSTARCH)
 goroot=$(go env GOROOT)
-commit_time=$(git log -1 --format=%ct)
+commit_time=$(git log -1 --no-show-signature --format=%ct)
 case $commit_time in
   '' | *[!0-9]*) die "git log -1 --format=%ct gave no commit time" ;;
 esac
+
+if [ -n "$(git status --porcelain)" ]; then
+  echo "release builds come from a clean checkout; commit or stash first" >&2
+  exit 1
+fi
+
+if ! go mod verify >/dev/null; then
+  die "go mod verify failed: the module cache does not match go.sum"
+fi
 
 tmp=$(mktemp -d)
 trap 'rm -rf -- "$tmp"' EXIT
@@ -78,35 +93,75 @@ build_arch() {
   local arch=$1
   local stage="$tmp/castra_${version#v}_linux_$arch"
   local bin="$stage/castra"
-  local info ldflags_line got kind path ver file name lower dir found
+  local info build_lines default_godebug default_godebug_count line want
+  local expected_line got kind path ver rest mod_path mod_dir pkg_dir dir
+  local parent rel dest file name lower pkg_list
+  local -a expected=()
+  local -A dep_ver=() seen_module=() found_license=()
 
   mkdir -p -- "$stage"
   CGO_ENABLED=0 GOOS=linux GOARCH="$arch" \
-    go build -trimpath -ldflags "-X $module/internal/cli.version=$version" -o "$bin" .
+    go build -trimpath -buildvcs=false \
+      -ldflags "-X $module/internal/cli.version=$version" -o "$bin" .
 
   # go version -m indents every setting line with one tab; drop it so the
   # fields below start at the line's first character.
   info=$(go version -m "$bin" | sed -e $'s/^\t//')
-  grep -qxF -- $'build\tCGO_ENABLED=0' <<<"$info" ||
-    die "$arch: build info does not say CGO_ENABLED=0"
-  grep -qxF -- $'build\t-trimpath=true' <<<"$info" ||
-    die "$arch: build info does not say -trimpath=true"
-  grep -qxF -- $'build\tvcs.modified=false' <<<"$info" ||
-    { echo "release builds come from a clean checkout; commit or stash first" >&2; exit 1; }
   if grep -q '^=>' <<<"$info"; then
     die "$arch: a module replacement (=>) is in use, so its licenses would come from the wrong module"
   fi
 
-  ldflags_line=$(grep -E $'^build\t-ldflags=' <<<"$info" || true)
-  if [ -n "$ldflags_line" ]; then
-    case $ldflags_line in
-      *"-X $module/internal/cli.version=$version"*) ;;
-      *) die "$arch: build info's -ldflags lacks -X $module/internal/cli.version=$version" ;;
-    esac
-  elif ! grep -qaF -- "$version" "$bin"; then
-    # Go records -ldflags only when -trimpath is off (go.dev/issue/52372), so
-    # under -trimpath the version string in the binary is what is left to see.
-    die "$arch: the binary does not contain the version $version"
+  # An exact allowlist: the exports above make this the only build the
+  # caller can get, so any other line means something got in.
+  build_lines=$(sed -n $'s/^build\t//p' <<<"$info")
+  expected=(
+    '-buildmode=exe'
+    '-compiler=gc'
+    '-trimpath=true'
+    'CGO_ENABLED=0'
+    "GOARCH=$arch"
+    'GOOS=linux'
+  )
+  if [ "$arch" = amd64 ]; then
+    expected+=('GOAMD64=v1')
+  else
+    expected+=('GOARM64=v8.0')
+  fi
+  default_godebug_count=$(grep -c '^DefaultGODEBUG=' <<<"$build_lines" || true)
+  if [ "$default_godebug_count" -ne 1 ]; then
+    die "$arch: build info has $default_godebug_count DefaultGODEBUG= build lines, want exactly one"
+  fi
+  default_godebug=$(grep '^DefaultGODEBUG=' <<<"$build_lines")
+  expected+=("$default_godebug")
+
+  while IFS= read -r line; do
+    [ -n "$line" ] || continue
+    want=0
+    for expected_line in "${expected[@]}"; do
+      if [ "$line" = "$expected_line" ]; then
+        want=1
+        break
+      fi
+    done
+    if [ "$want" -ne 1 ]; then
+      die "$arch: build info has the build line '$line', which is not allowed"
+    fi
+  done <<<"$build_lines"
+  for expected_line in "${expected[@]}"; do
+    if ! grep -qxF -- "$expected_line" <<<"$build_lines"; then
+      die "$arch: build info is missing the build line '$expected_line'"
+    fi
+  done
+  line=$(sort <<<"$build_lines" | uniq -d | head -n 1)
+  if [ -n "$line" ]; then
+    die "$arch: build info repeats the build line '$line'"
+  fi
+
+  # Go records -ldflags only when -trimpath is off, so a version string
+  # elsewhere in the binary proves nothing. The linker emits version.str
+  # only when -X actually applied.
+  if ! go tool nm "$bin" | awk -v want="$module/internal/cli.version.str" '$NF == want { found = 1 } END { exit(found ? 0 : 1) }'; then
+    die "$arch: go tool nm lists no $module/internal/cli.version.str, so the version is not stamped"
   fi
 
   if [ "$hostos/$hostarch" = "linux/$arch" ]; then
@@ -120,29 +175,83 @@ build_arch() {
   mkdir -p -- "$stage/licenses/go"
   cp -- "$goroot/LICENSE" "$goroot/PATENTS" "$stage/licenses/go/"
 
-  while IFS=$'\t' read -r kind path ver _; do
+  while IFS=$'\t' read -r kind path ver rest; do
     [ "$kind" = dep ] || continue
-    go mod download "$path@$ver" >/dev/null
-    dir=$(go list -m -f '{{.Dir}}' "$path@$ver")
-    if [ -z "$dir" ] || [ ! -d "$dir" ]; then
-      die "$path $ver: go list -m gave no module folder"
-    fi
-    mkdir -p -- "$stage/licenses/$path"
-    found=0
-    while IFS= read -r -d '' file; do
-      name=${file##*/}
-      lower=${name,,}
-      case $lower in
-        license* | licence* | copying*) found=1 ;;
-        notice* | patents*) ;;
-        *) continue ;;
-      esac
-      cp -- "$file" "$stage/licenses/$path/"
-    done < <(find "$dir" -maxdepth 1 -type f -print0)
-    if [ "$found" -ne 1 ]; then
-      die "$path $ver has no LICENSE, LICENCE or COPYING file"
-    fi
+    dep_ver["$path"]=$ver
   done <<<"$info"
+
+  # The packages the binary links, each with its module and module folder.
+  # Standard-library packages have no module, and castra's own packages are
+  # the main module; both are covered by licenses/go/ and the root files.
+  if ! pkg_list=$(GOOS=linux GOARCH="$arch" CGO_ENABLED=0 \
+    go list -deps -f '{{if .Module}}{{if not .Module.Main}}{{.Module.Path}}{{"\t"}}{{.Module.Dir}}{{"\t"}}{{.Dir}}{{end}}{{end}}' .); then
+    die "$arch: go list -deps failed"
+  fi
+
+  while IFS=$'\t' read -r mod_path mod_dir pkg_dir; do
+    [ -n "$mod_path" ] || continue
+    if [ -z "$mod_dir" ] || [ ! -d "$mod_dir" ]; then
+      die "$mod_path: go list -deps gave no module folder"
+    fi
+    if [ -z "$pkg_dir" ] || [ ! -d "$pkg_dir" ]; then
+      die "$mod_path: go list -deps gave no package folder"
+    fi
+    case $pkg_dir in
+      "$mod_dir" | "$mod_dir"/*) ;;
+      *) die "$mod_path: package folder $pkg_dir is not inside module folder $mod_dir" ;;
+    esac
+    seen_module["$mod_path"]=1
+
+    # A license can sit next to any linked package, not only at the module
+    # root, so walk from the package folder up to the module folder.
+    dir=$pkg_dir
+    while :; do
+      if [ "$dir" = "$mod_dir" ]; then
+        rel=""
+      else
+        rel=${dir#"$mod_dir"/}
+      fi
+      dest="$stage/licenses/$mod_path"
+      if [ -n "$rel" ]; then
+        dest="$dest/$rel"
+      fi
+      while IFS= read -r -d '' file; do
+        name=${file##*/}
+        lower=${name,,}
+        case $lower in
+          license* | licence* | copying*) found_license["$mod_path"]=1 ;;
+          notice* | patents* | copyright*) ;;
+          *) continue ;;
+        esac
+        mkdir -p -- "$dest"
+        # The module cache is read-only, and a module root's license is seen
+        # once per linked package, so replace any earlier copy.
+        cp -f -- "$file" "$dest/"
+      done < <(find "$dir" -maxdepth 1 -type f -print0)
+      if [ "$dir" = "$mod_dir" ]; then
+        break
+      fi
+      parent=${dir%/*}
+      if [ -z "$parent" ] || [ "$parent" = "$dir" ]; then
+        die "$mod_path: cannot walk from $pkg_dir up to $mod_dir"
+      fi
+      dir=$parent
+    done
+  done <<<"$pkg_list"
+
+  for path in "${!dep_ver[@]}"; do
+    if [ -z "${seen_module[$path]+set}" ]; then
+      die "$arch: go version -m lists module $path, but go list -deps did not"
+    fi
+  done
+  for path in "${!seen_module[@]}"; do
+    if [ -z "${dep_ver[$path]+set}" ]; then
+      die "$arch: go list -deps found module $path, but go version -m does not list it"
+    fi
+    if [ -z "${found_license[$path]+set}" ]; then
+      die "$path ${dep_ver[$path]}: no LICENSE, LICENCE or COPYING file"
+    fi
+  done
 }
 
 for arch in amd64 arm64; do
@@ -154,10 +263,12 @@ for arch in amd64 arm64; do
   base="castra_${version#v}_linux_$arch"
   # --sort, a fixed mtime and numeric owner keep the archive byte-identical;
   # --mode lifts the module cache's 0444 and normalises everything else.
-  tar --create --file=- --directory="$tmp/$base" --sort=name --format=ustar \
-    --mtime="@$commit_time" --owner=0 --group=0 --numeric-owner \
-    --mode='a+rX,u+w,go-w' castra LICENSE NOTICE licenses |
-    gzip -9 --no-name > "$tmp/$base.tar.gz"
+  # tar and gzip read options from the environment, so clear TAR_OPTIONS
+  # and GZIP for both.
+  env -u TAR_OPTIONS -u GZIP tar --create --file=- --directory="$tmp/$base" \
+    --sort=name --format=ustar --mtime="@$commit_time" --owner=0 --group=0 \
+    --numeric-owner --mode='a+rX,u+w,go-w' castra LICENSE NOTICE licenses |
+    env -u TAR_OPTIONS -u GZIP gzip -9 --no-name > "$tmp/$base.tar.gz"
   archives+=("$base.tar.gz")
 done
 

@@ -35,6 +35,14 @@ jobs:
       - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
         with:
           go-version-file: go.mod
+          # A tag build must not restore Actions caches that other workflows
+          # saved: those jobs run third-party tools, and go build trusts both
+          # caches.
+          cache: false
+      - name: Publishing waits for go vet to pass
+        run: go vet ./...
+      - name: Publishing waits for the tests to pass
+        run: go test -race ./...
       - name: A known vulnerability stops the release
         run: go run golang.org/x/vuln/cmd/govulncheck@v1.9.0 ./...
       - name: Build the release archives with scripts/release
@@ -98,6 +106,7 @@ jobs:
     needs: publish
     permissions:
       contents: read
+      attestations: read
     # The release, installed the way users install it, passes the end-to-end suite.
     uses: ./.github/workflows/e2e.yml
     with:
