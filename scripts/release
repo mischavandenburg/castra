@@ -1,0 +1,177 @@
+#!/usr/bin/env bash
+# Builds castra's release archives: one tarball per architecture, each with
+# the binary, the project's LICENSE and NOTICE, and the licenses of every
+# module linked into the binary, plus a checksums.txt over the two.
+#
+# The archives are reproducible: the same commit and version give the same
+# bytes, so a release workflow and a maintainer running this by hand produce
+# identical files. Everything is built in a temporary directory and only
+# moved into outdir once all three files exist, so a failed run changes
+# nothing outside that temporary directory.
+#
+# Usage: scripts/release vX.Y.Z[-pre] [outdir]   (outdir defaults to dist)
+set -euo pipefail
+
+usage() {
+  echo "usage: scripts/release vX.Y.Z[-pre] [outdir]" >&2
+  exit 2
+}
+
+die() {
+  echo "release: $*" >&2
+  exit 1
+}
+
+if [ "$#" -lt 1 ] || [ "$#" -gt 2 ]; then
+  usage
+fi
+version=$1
+outdir=${2:-dist}
+if [[ ! $version =~ ^v[0-9]+\.[0-9]+\.[0-9]+(-[0-9A-Za-z.]+)?$ ]]; then
+  usage
+fi
+
+# A relative outdir is relative to where the caller stands, not the repo.
+invoke_dir=$PWD
+case $outdir in
+  /*) ;;
+  *) outdir="$invoke_dir/$outdir" ;;
+esac
+
+script_dir=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)
+cd -- "$(dirname -- "$script_dir")"
+
+module=$(go list -m)
+if [ -z "$module" ]; then
+  die "go list -m printed no module path"
+fi
+
+goversion=$(go env GOVERSION)
+toolchain=$(awk '$1 == "toolchain" { print $2; exit }' go.mod)
+if [ -z "$toolchain" ]; then
+  die "go.mod has no toolchain line, but go env GOVERSION is $goversion"
+fi
+if [ "$goversion" != "$toolchain" ]; then
+  die "go env GOVERSION is $goversion, but go.mod's toolchain is $toolchain"
+fi
+
+tar_version=$(tar --version 2>/dev/null || true)
+case $tar_version in
+  *"GNU tar"*) ;;
+  *) die "tar is not GNU tar, but the archive flags need it" ;;
+esac
+
+hostos=$(go env GOHOSTOS)
+hostarch=$(go env GOHOSTARCH)
+goroot=$(go env GOROOT)
+commit_time=$(git log -1 --format=%ct)
+case $commit_time in
+  '' | *[!0-9]*) die "git log -1 --format=%ct gave no commit time" ;;
+esac
+
+tmp=$(mktemp -d)
+trap 'rm -rf -- "$tmp"' EXIT
+
+# Builds one architecture, then checks what went into the binary and gathers
+# the licenses of the binary itself, the standard library and every module.
+build_arch() {
+  local arch=$1
+  local stage="$tmp/castra_${version#v}_linux_$arch"
+  local bin="$stage/castra"
+  local info ldflags_line got kind path ver file name lower dir found
+
+  mkdir -p -- "$stage"
+  CGO_ENABLED=0 GOOS=linux GOARCH="$arch" \
+    go build -trimpath -ldflags "-X $module/internal/cli.version=$version" -o "$bin" .
+
+  # go version -m indents every setting line with one tab; drop it so the
+  # fields below start at the line's first character.
+  info=$(go version -m "$bin" | sed -e $'s/^\t//')
+  grep -qxF -- $'build\tCGO_ENABLED=0' <<<"$info" ||
+    die "$arch: build info does not say CGO_ENABLED=0"
+  grep -qxF -- $'build\t-trimpath=true' <<<"$info" ||
+    die "$arch: build info does not say -trimpath=true"
+  grep -qxF -- $'build\tvcs.modified=false' <<<"$info" ||
+    { echo "release builds come from a clean checkout; commit or stash first" >&2; exit 1; }
+  if grep -q '^=>' <<<"$info"; then
+    die "$arch: a module replacement (=>) is in use, so its licenses would come from the wrong module"
+  fi
+
+  ldflags_line=$(grep -E $'^build\t-ldflags=' <<<"$info" || true)
+  if [ -n "$ldflags_line" ]; then
+    case $ldflags_line in
+      *"-X $module/internal/cli.version=$version"*) ;;
+      *) die "$arch: build info's -ldflags lacks -X $module/internal/cli.version=$version" ;;
+    esac
+  elif ! grep -qaF -- "$version" "$bin"; then
+    # Go records -ldflags only when -trimpath is off (go.dev/issue/52372), so
+    # under -trimpath the version string in the binary is what is left to see.
+    die "$arch: the binary does not contain the version $version"
+  fi
+
+  if [ "$hostos/$hostarch" = "linux/$arch" ]; then
+    got=$("$bin" version)
+    if [ "$got" != "castra $version" ]; then
+      die "$arch: castra version printed '$got', want 'castra $version'"
+    fi
+  fi
+
+  cp -- LICENSE NOTICE "$stage/"
+  mkdir -p -- "$stage/licenses/go"
+  cp -- "$goroot/LICENSE" "$goroot/PATENTS" "$stage/licenses/go/"
+
+  while IFS=$'\t' read -r kind path ver _; do
+    [ "$kind" = dep ] || continue
+    go mod download "$path@$ver" >/dev/null
+    dir=$(go list -m -f '{{.Dir}}' "$path@$ver")
+    if [ -z "$dir" ] || [ ! -d "$dir" ]; then
+      die "$path $ver: go list -m gave no module folder"
+    fi
+    mkdir -p -- "$stage/licenses/$path"
+    found=0
+    while IFS= read -r -d '' file; do
+      name=${file##*/}
+      lower=${name,,}
+      case $lower in
+        license* | licence* | copying*) found=1 ;;
+        notice* | patents*) ;;
+        *) continue ;;
+      esac
+      cp -- "$file" "$stage/licenses/$path/"
+    done < <(find "$dir" -maxdepth 1 -type f -print0)
+    if [ "$found" -ne 1 ]; then
+      die "$path $ver has no LICENSE, LICENCE or COPYING file"
+    fi
+  done <<<"$info"
+}
+
+for arch in amd64 arm64; do
+  build_arch "$arch"
+done
+
+archives=()
+for arch in amd64 arm64; do
+  base="castra_${version#v}_linux_$arch"
+  # --sort, a fixed mtime and numeric owner keep the archive byte-identical;
+  # --mode lifts the module cache's 0444 and normalises everything else.
+  tar --create --file=- --directory="$tmp/$base" --sort=name --format=ustar \
+    --mtime="@$commit_time" --owner=0 --group=0 --numeric-owner \
+    --mode='a+rX,u+w,go-w' castra LICENSE NOTICE licenses |
+    gzip -9 --no-name > "$tmp/$base.tar.gz"
+  archives+=("$base.tar.gz")
+done
+
+(cd -- "$tmp" && sha256sum -- "${archives[@]}" > checksums.txt)
+
+mkdir -p -- "$outdir"
+paths=()
+for archive in "${archives[@]}"; do
+  paths+=("$tmp/$archive")
+done
+mv -f -- "${paths[@]}" "$tmp/checksums.txt" "$outdir/"
+
+for archive in "${archives[@]}"; do
+  size=$(stat -c %s -- "$outdir/$archive")
+  printf '%s %s bytes\n' "$archive" "$size"
+done
+cat -- "$outdir/checksums.txt"

@@ -8,6 +8,22 @@ name: e2e
 on:
   push:
   pull_request:
+  # The release workflow proves every release with this suite, castra coming
+  # from the published release through mise on fresh runners instead of a build
+  # of the commit. By hand:
+  #   gh workflow run e2e.yml --ref vX.Y.Z -f release=vX.Y.Z
+  workflow_call:
+    inputs:
+      release:
+        description: a release tag to install with mise and test, such as v0.1.0
+        required: true
+        type: string
+  workflow_dispatch:
+    inputs:
+      release:
+        description: a release tag to install with mise and test, such as v0.1.0
+        required: true
+        type: string
 
 permissions:
   contents: read
@@ -27,6 +43,7 @@ jobs:
         with:
           persist-credentials: false
       - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        if: inputs.release == ''
         with:
           go-version-file: go.mod
       - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
@@ -39,9 +56,33 @@ jobs:
           sudo apt-get -o Acquire::Retries=3 update -q
           sudo apt-get install -yq openssh-server
       - name: Build castra
+        if: inputs.release == ''
         run: CGO_ENABLED=0 go build -trimpath -o dist/castra .
+      - uses: jdx/mise-action@6be3c7ed4c21d4f76b208d351d95aac273ebb76d # v5.2.4
+        if: inputs.release != ''
+        with:
+          install: false
+          cache: false # a cached install would hide whether a fresh one works
+      - name: Install castra from the release with mise, the way the README tells users
+        if: inputs.release != ''
+        env:
+          RELEASE: ${{ inputs.release }}
+          GITHUB_TOKEN: ${{ github.token }} # mise's GitHub API calls
+          MISE_PRERELEASES: "1" # an exact version is installed, and a v*-* rehearsal release is a prerelease, which mise otherwise skips
+        run: |
+          mise use -g "github:${GITHUB_REPOSITORY}@${RELEASE#v}"
+          castra=$(mise which castra)
+          version=$("$castra" version)
+          if [ "$version" != "castra $RELEASE" ]; then
+            echo "::error::the release installed with mise reports \"$version\", not \"castra $RELEASE\""
+            exit 1
+          fi
+          echo "binary: $castra"
+          echo "version: $version"
+          sha256sum "$castra"
+          echo "CASTRA=$castra" >> "$GITHUB_ENV"
       # --strict: a check that cannot run fails instead of being skipped.
       - name: End-to-end on ${{ matrix.engine }}
         env:
           ENGINE: ${{ matrix.engine }}
-        run: CASTRA="$PWD/dist/castra" test/e2e/run --engine "$ENGINE" --strict 2>&1
+        run: CASTRA="${CASTRA:-$PWD/dist/castra}" test/e2e/run --engine "$ENGINE" --strict 2>&1

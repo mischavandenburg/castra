@@ -1,0 +1,104 @@
+name: release
+
+# Pushing a tag vX.Y.Z builds castra for Linux (amd64 and arm64) with
+# scripts/release, attests the archives and the binaries, publishes a GitHub
+# Release, and proves it: e2e.yml installs the release with mise on fresh
+# runners and runs the end-to-end suite against it. A tag with a suffix such as
+# v0.2.0-rc.1 becomes a prerelease. A dry run
+# (gh workflow run release.yml -f version=v0.2.0) builds the same archives and
+# keeps them as a workflow artifact, with nothing attested or published.
+
+on:
+  push:
+    tags:
+      - 'v*'
+  workflow_dispatch:
+    inputs:
+      version:
+        description: the version to stamp into a dry-run build, such as v0.1.0; nothing is published
+        required: true
+        type: string
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        with:
+          go-version-file: go.mod
+      - name: A known vulnerability stops the release
+        run: go run golang.org/x/vuln/cmd/govulncheck@v1.9.0 ./...
+      - name: Build the release archives with scripts/release
+        env:
+          VERSION: ${{ github.event_name == 'push' && github.ref_name || inputs.version }}
+        run: scripts/release "$VERSION" dist
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: release
+          path: |
+            dist/castra_*.tar.gz
+            dist/checksums.txt
+          if-no-files-found: error
+
+  publish:
+    needs: build
+    if: github.event_name == 'push'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    permissions:
+      contents: write # create the release
+      id-token: write # a Sigstore certificate for the provenance
+      attestations: write # store the provenance with the repository
+    steps:
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          name: release
+          path: dist
+      - name: The files match the checksums the build job made
+        working-directory: dist
+        run: sha256sum --check --strict checksums.txt
+      - name: Extract each binary so it can be attested too
+        working-directory: dist
+        run: |
+          for archive in castra_*.tar.gz; do
+            dir="bin/${archive%.tar.gz}"
+            mkdir -p "$dir"
+            tar -xzf "$archive" -C "$dir" castra
+          done
+      - uses: actions/attest@1e69f48acb82d1966a394da916b4c1698aa569d6 # v4.2.2
+        with:
+          subject-path: |
+            dist/castra_*.tar.gz
+            dist/bin/*/castra
+      - name: Create the GitHub Release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ github.ref_name }}
+        run: |
+          V="${TAG#v}"
+          # shellcheck disable=SC2016 # the backticks are Markdown, not commands
+          notes=$(printf 'castra %s for Linux on amd64 and arm64.\n\nInstall it with [mise](https://mise.jdx.dev):\n\n    mise use -g github:%s@%s\n\nor download the archive for your machine and put the `castra` binary from it on your `PATH`. Check a download with `sha256sum --check --ignore-missing checksums.txt`, and its build provenance with `gh attestation verify <archive> --repo %s`.\n' "$TAG" "$GITHUB_REPOSITORY" "$V" "$GITHUB_REPOSITORY")
+          # A bash array, so a stable tag passes no empty argument.
+          flags=()
+          case "$TAG" in
+            *-*) flags+=(--prerelease) ;;
+          esac
+          gh release create "$TAG" --repo "$GITHUB_REPOSITORY" --verify-tag --title "castra $TAG" "${flags[@]}" --notes "$notes" --generate-notes dist/castra_*.tar.gz dist/checksums.txt
+
+  prove:
+    needs: publish
+    permissions:
+      contents: read
+    # The release, installed the way users install it, passes the end-to-end suite.
+    uses: ./.github/workflows/e2e.yml
+    with:
+      release: ${{ github.ref_name }}
