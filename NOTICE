@@ -1,0 +1,9 @@
+castra
+Copyright 2026 Mischa van den Burg
+
+castra follows the design of DevPod (https://github.com/loft-sh/devpod) by
+Loft Labs, licensed under MPL-2.0. It contains no DevPod code.
+
+docs/castra-plan.png is "Marschlager nach Polybios" by Mediatus, from
+Wikimedia Commons, licensed under CC BY-SA 3.0 and not under the Apache
+License: https://commons.wikimedia.org/wiki/File:Marschlager_nach_Polybios.png

@@ -9,7 +9,7 @@
 
 castra builds a devcontainer from your project's `.devcontainer` folder, runs it on Podman (or Docker) on your own machine, and lets you in over SSH with your ssh-agent forwarded. That's all it does.
 
-> **Status: early.** Tested on Linux with rootless Podman 5 and with Docker 29 (Fedora 43, SELinux enforcing). macOS is not tested yet ([#1](https://github.com/mischavandenburg/castra/issues/1)). There is no license yet ([#2](https://github.com/mischavandenburg/castra/issues/2)), which means you may read the code but not reuse it until one is chosen.
+> **Status: early.** Tested on Linux with rootless Podman 5 and with Docker 29 (Fedora 43, SELinux enforcing). macOS is not tested yet ([#1](https://github.com/mischavandenburg/castra/issues/1)).
 
 ## Why
 
@@ -143,3 +143,13 @@ castra says no to these on purpose, so it stays small:
 - **Daemons.** Nothing runs in the background on your machine or in the container between sessions: no inactivity timeout, no auto-stop.
 - **Credential forwarding.** Only your ssh-agent is forwarded. No git or Docker credential helpers.
 - **Docker Compose devcontainers**, for now.
+
+## Credits
+
+castra exists because of [DevPod](https://github.com/loft-sh/devpod) by Loft Labs. It follows DevPod's local path closely: a small SSH server in the container reached through the engine's `exec`, the agent forwarded per session, dotfiles installed over that agent after `up`, and DevPod's SSH settings. castra was written from scratch and contains no DevPod code; DevPod is licensed under MPL-2.0.
+
+The devcontainer.json work is done by Microsoft's [devcontainer CLI](https://github.com/devcontainers/cli).
+
+## License
+
+castra is licensed under the [Apache License 2.0](LICENSE). Anyone who redistributes it keeps the [NOTICE](NOTICE) file, which carries the DevPod credit. The camp plan image is the one exception: it is CC BY-SA 3.0, credited under it at the top.
