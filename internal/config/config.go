@@ -2,10 +2,12 @@
 package config
 
 import (
+	"encoding/json"
 	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
+	"strings"
 
 	"sigs.k8s.io/yaml"
 )
@@ -26,9 +28,10 @@ type Dotfiles struct {
 	Install string `json:"install,omitempty"`
 }
 
-// Path is the config file location.
+// Path is the config file location. A relative $XDG_CONFIG_HOME is ignored
+// because the XDG Base Directory spec says such a path is invalid.
 func Path() (string, error) {
-	if d := os.Getenv("XDG_CONFIG_HOME"); d != "" {
+	if d := os.Getenv("XDG_CONFIG_HOME"); filepath.IsAbs(d) {
 		return filepath.Join(d, "castra", "config.yaml"), nil
 	}
 	home, err := os.UserHomeDir()
@@ -53,7 +56,27 @@ func Load() (Config, error) {
 	}
 	var c Config
 	if err := yaml.UnmarshalStrict(b, &c); err != nil {
-		return Config{}, fmt.Errorf("%s: %w", p, err)
+		return Config{}, fmt.Errorf("%s: %s", p, cleanError(err))
 	}
 	return c, nil
+}
+
+// cleanError rewrites the YAML library's error in castra's words. It removes
+// most of the library's JSON wording, but not all: a NaN or Inf value under
+// an unknown key can still surface "json: unsupported value: NaN".
+func cleanError(err error) string {
+	var typeErr *json.UnmarshalTypeError
+	if errors.As(err, &typeErr) && typeErr.Field != "" {
+		return fmt.Sprintf("wrong type for setting %q (got %s)", typeErr.Field, typeErr.Value)
+	}
+	msg := err.Error()
+	if rest, ok := strings.CutPrefix(msg, "error converting YAML to JSON: "); ok {
+		msg = rest
+	} else if rest, ok := strings.CutPrefix(msg, "error unmarshaling JSON: while decoding JSON: json: "); ok {
+		msg = rest
+		if field, ok := strings.CutPrefix(msg, "unknown field "); ok {
+			msg = "unknown setting " + field
+		}
+	}
+	return msg
 }
