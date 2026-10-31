@@ -113,7 +113,9 @@ What the container can and cannot reach, and how to report a problem: [SECURITY.
 
 ## Testing
 
-`go test -race ./...` runs the unit tests, which include the SSH server against a real client, the dotfiles script under `sh`, and the quoting that stands between devcontainer.json and the shell. `test/e2e/run --engine podman` (or `docker`) runs the whole surface against the fixture in `test/fixtures/e2e` on a machine with the engine installed: up, ssh, the forwarded agent, scp, dotfiles, stop, recreate and delete. It uses a throwaway ssh-agent and cleans up after itself.
+`go test -race ./...` runs the unit tests, which include the SSH server against a real client, the dotfiles script under `sh`, and the quoting that stands between devcontainer.json and the shell. `test/e2e/run --engine podman` (or `docker`) runs the whole surface against the fixture in `test/fixtures/e2e` on a Linux machine with the engine installed: up, ssh in a command and in a terminal, the forwarded agent, scp, port forwarding, host networking, dotfiles cloned over SSH, an idle session, stop, recreate and delete. It brings its own ssh-agent with a throwaway key and its own sshd on 127.0.0.1 that lets in only that key, so it needs `sshd` installed (the `openssh-server` package; the service does not have to run), and it cleans up after itself.
+
+GitHub Actions runs the same script on every push ([e2e.yml](.github/workflows/e2e.yml)): rootless Podman and Docker, each on Ubuntu 24.04 and 26.04.
 
 ## Podman or Docker
 

@@ -1,0 +1,45 @@
+name: e2e
+
+# test/e2e/run on GitHub's own runners: rootless Podman and Docker, each on
+# Ubuntu 24.04 (Podman 4.9, Docker 28) and 26.04 (Podman 5.7, Docker 29).
+# Both images are named, not ubuntu-latest, so both engine generations users
+# meet stay tested and a move of that label cannot change what runs here.
+
+on:
+  push:
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  e2e:
+    name: e2e (${{ matrix.os }}, ${{ matrix.engine }})
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-24.04, ubuntu-26.04]
+        engine: [podman, docker]
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        with:
+          go-version-file: go.mod
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        with:
+          node-version: lts/*
+      - name: Install the devcontainer CLI the way the README tells users
+        run: npm install -g @devcontainers/cli
+      - name: Install sshd, which the suite starts as the runner user
+        run: |
+          sudo apt-get update -q
+          sudo apt-get install -yq openssh-server
+      - name: Build castra
+        run: CGO_ENABLED=0 go build -trimpath -o dist/castra .
+      # --strict: a check that cannot run fails instead of being skipped.
+      - name: End-to-end on ${{ matrix.engine }}
+        env:
+          ENGINE: ${{ matrix.engine }}
+        run: CASTRA="$PWD/dist/castra" test/e2e/run --engine "$ENGINE" --strict 2>&1

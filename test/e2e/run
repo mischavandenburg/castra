@@ -1,37 +1,61 @@
 #!/usr/bin/env bash
 # End-to-end test of castra against test/fixtures/e2e on one container engine.
 #
-#   test/e2e/run --engine podman|docker [--keep]
+#   test/e2e/run --engine podman|docker [--keep] [--strict]
 #
-# Needs: castra (or $CASTRA), the engine, ssh, ssh-agent, ssh-keygen, scp,
-# git, and the devcontainer CLI. It starts its own ssh-agent with a throwaway
-# key, so your agent is never used, and it deletes the workspace it made
-# unless --keep is given. It touches your real castra files the way any
-# `castra up` does: a workspace record and a Host file,
-# all removed again by `castra delete` at the end.
+# Linux only; macOS is tested by hand (issue #1). Needs: castra (or $CASTRA),
+# the engine, the devcontainer CLI, git, ssh, ssh-agent, ssh-keygen, scp,
+# script, ss, ip, and sshd (the openssh-server package; its service does not
+# have to run). It starts its own ssh-agent with a throwaway key and its own
+# sshd on 127.0.0.1 that lets in only that key, so your agent, your keys and
+# your sshd are never used, and it deletes the workspace it made unless
+# --keep is given. It touches your real castra files the way any `castra up`
+# does: a workspace record and a Host file, both removed again by
+# `castra delete` at the end. --strict turns every SKIP into a FAIL, so no
+# check passes by not running; CI runs with it.
 set -uo pipefail
 
-usage() { echo "usage: $0 --engine podman|docker [--keep]" >&2; exit 2; }
-engine="" keep=0
+usage() { echo "usage: $0 --engine podman|docker [--keep] [--strict]" >&2; exit 2; }
+engine="" keep=0 strict=0
 while [ $# -gt 0 ]; do
   case "$1" in
     --engine) engine="$2"; shift 2 ;;
     --keep) keep=1; shift ;;
+    --strict) strict=1; shift ;;
     *) usage ;;
   esac
 done
 case "$engine" in podman|docker) ;; *) usage ;; esac
+[ "$(uname)" = Linux ] || { echo "$0: Linux only; macOS is tested by hand (issue #1)" >&2; exit 2; }
 
 CASTRA="${CASTRA:-castra}"
+sshd_bin="$(command -v sshd || echo /usr/sbin/sshd)"
+for tool in "$CASTRA" "$engine" git ssh ssh-agent ssh-keygen scp script ss ip; do
+  command -v "$tool" >/dev/null || { echo "$0: needs $tool" >&2; exit 2; }
+done
+[ -x "$sshd_bin" ] || { echo "$0: needs sshd (the openssh-server package; its service does not have to run)" >&2; exit 2; }
+
 here="$(cd "$(dirname "$0")/../.." && pwd)"
 name="castra-e2e-$engine"
+other=docker; [ "$engine" = docker ] && other=podman
 tmp="$(mktemp -d)"
 dir="$tmp/$name"
 castra_dir="$HOME/.ssh/castra"
-failures=0
+failures=0 passes=0 failed=()
 
-pass() { echo "PASS  $*"; }
-fail() { echo "FAIL  $*" >&2; failures=$((failures + 1)); }
+pass() { echo "PASS  $*"; passes=$((passes + 1)); }
+fail() {
+  echo "FAIL  $*" >&2
+  failures=$((failures + 1)); failed+=("$*")
+  if [ "${GITHUB_ACTIONS:-}" = true ]; then # an annotation, so the run's summary names the check
+    local msg="$*" pct=%
+    msg="${msg//$pct/%25}"; msg="${msg//$'\r'/%0D}"; msg="${msg//$'\n'/%0A}"
+    echo "::error title=castra e2e on $engine::$msg"
+  fi
+}
+skip() { # skip <description>: a check this machine cannot run; a failure under --strict
+  if [ "$strict" = 1 ]; then fail "$* (skipped, and --strict allows no skips)"; else echo "SKIP  $*"; fi
+}
 check() { # check <description> <command...>: PASS when the command exits 0
   local what="$1"; shift
   if "$@"; then pass "$what"; else fail "$what"; fi
@@ -47,19 +71,31 @@ in_ws() { "$CASTRA" ssh "$name" -- "$@" </dev/null 2>/dev/null; }
 count() { cat -- "$2" 2>/dev/null | grep -c -- "$1"; } # matching lines; 0 for a missing file
 ctr_id() { "$engine" ps -a --filter "label=castra.workspace=$name" --format '{{.ID}}'; }
 ctr_count() { ctr_id | grep -c .; }
+pty() { SHELL="$BASH" script -qec "$(printf '%q ' "$@")" /dev/null | tr -d '\r'; } # run under a terminal
+banner() { timeout 5 bash -c 'exec 3<>"/dev/tcp/127.0.0.1/$1" && head -c 7 <&3' _ "$1" 2>/dev/null; }
+on_other() { # on_other <when>: the workspace never appears on the engine it was not made with
+  local out
+  if ! command -v "$other" >/dev/null; then skip "no container on $other $1: $other is not installed here"; return; fi
+  if ! out="$("$other" ps -a --filter "label=castra.workspace=$name" --format '{{.ID}}' 2>&1)"; then
+    skip "no container on $other $1: $other ps failed: $out"; return
+  fi
+  expect "no container on $other $1" 0 "$(grep -c . <<<"$out")"
+}
 
 cleanup() {
   if [ "$keep" = 0 ]; then
     "$CASTRA" delete "$name" -y </dev/null >/dev/null 2>&1 || true
-    rm -rf "$tmp"
   else
     echo "kept: workspace $name, files in $tmp"
   fi
+  kill $(jobs -p) 2>/dev/null
+  [ -n "${sshd_pid:-}" ] && kill "$sshd_pid" 2>/dev/null
   [ -n "${SSH_AGENT_PID:-}" ] && kill "$SSH_AGENT_PID" 2>/dev/null
+  [ "$keep" = 0 ] && rm -rf "$tmp"
 }
 trap cleanup EXIT
 
-echo "castra e2e on $engine ($("$engine" --version | head -1)); castra $("$CASTRA" version)"
+echo "castra e2e on $engine: $("$engine" --version | head -1); $("$CASTRA" version); devcontainer CLI $(devcontainer --version 2>/dev/null || echo unknown); $(. /etc/os-release && echo "$PRETTY_NAME"); user $(id -un) uid $(id -u)"
 
 # The fixture, copied so the workspace is named after this run. Docker refuses
 # the Podman-only z mount option.
@@ -68,8 +104,8 @@ if [ "$engine" = docker ]; then
   sed -i.bak 's/,z"/"/' "$dir/.devcontainer/devcontainer.json" && rm -f "$dir/.devcontainer/devcontainer.json.bak"
 fi
 
-# A dotfiles remote the container reaches through the fixture's bind mount.
-# Its installer records whether the forwarded agent was visible while it ran.
+# The dotfiles. Their installer records whether the forwarded agent was
+# visible while it ran.
 work="$tmp/dotfiles-work"
 mkdir -p "$work"
 cat > "$work/install" <<'EOF'
@@ -81,7 +117,7 @@ chmod +x "$work/install"
 git -C "$work" init -q -b main
 git -C "$work" -c user.name=castra -c user.email=castra@example.invalid add . >/dev/null
 git -C "$work" -c user.name=castra -c user.email=castra@example.invalid commit -q -m dotfiles
-git clone -q --bare "$work" "$dir/mounted/dotfiles.git"
+git clone -q --bare "$work" "$tmp/dotfiles.git"
 
 # A throwaway agent with one key, so forwarding is provable and nothing of
 # yours is involved.
@@ -90,9 +126,45 @@ ssh-keygen -q -t ed25519 -N '' -C castra-e2e-key -f "$tmp/key"
 ssh-add -q "$tmp/key"
 export SSH_AUTH_SOCK
 
+# An sshd of the test's own, run as you on 127.0.0.1, that lets in only the
+# throwaway key. The fixture shares this machine's network (--network=host),
+# so the container clones the dotfiles from it over SSH, which works only
+# through the forwarded agent, and the port forwarding checks carry its banner.
+# Without root there is no PAM; Fedora's sshd logs a warning about it anyway.
+sshd_dir="$tmp/sshd"
+mkdir -p "$sshd_dir"
+ssh-keygen -q -t ed25519 -N '' -C castra-e2e-sshd -f "$sshd_dir/host_key"
+cp "$tmp/key.pub" "$sshd_dir/authorized_keys"
+cat > "$sshd_dir/config" <<EOF
+ListenAddress 127.0.0.1
+HostKey $sshd_dir/host_key
+PidFile $sshd_dir/sshd.pid
+AuthorizedKeysFile $sshd_dir/authorized_keys
+PasswordAuthentication no
+KbdInteractiveAuthentication no
+UsePAM no
+StrictModes no
+EOF
+sshd_port="" sshd_pid=""
+for _ in 1 2 3 4 5; do
+  port=$((40000 + RANDOM % 10000)) # clear of the forwarding and listener ports below
+  [ -n "$(ss -Htln "sport = :$port")" ] && continue
+  "$sshd_bin" -D -f "$sshd_dir/config" -p "$port" -E "$sshd_dir/log" &
+  sshd_pid=$!
+  for _ in $(seq 1 50); do [ "$(banner "$port")" = SSH-2.0 ] && break; sleep 0.1; done
+  if [ "$(banner "$port")" = SSH-2.0 ]; then sshd_port="$port"; break; fi
+  kill "$sshd_pid" 2>/dev/null; wait "$sshd_pid" 2>/dev/null; sshd_pid=""
+done
+if [ -z "$sshd_port" ]; then
+  echo "$0: the test's own sshd did not start:" >&2
+  sed 's/^/  /' "$sshd_dir/log" >&2
+  exit 2
+fi
+remote="ssh://$(id -un)@127.0.0.1:$sshd_port$tmp/dotfiles.git"
+
 # up
 t0=$(date +%s)
-check "castra up" "$CASTRA" up "$dir" --engine "$engine" --dotfiles /mnt/fixture/dotfiles.git </dev/null
+check "castra up" "$CASTRA" up "$dir" --engine "$engine" --dotfiles "$remote" </dev/null
 echo "      (first up took $(( $(date +%s) - t0 )) s)"
 ctr="$(ctr_id)"
 expect "one container carries the label" 1 "$(ctr_count)"
@@ -105,6 +177,14 @@ for k in name state id folder; do
   check "ls --json has $k" grep -q "\"$k\":" <<<"$ls_json"
 done
 check "ls --json state is running" grep -q '"state": "running"' <<<"$ls_json"
+check "ls shows it running" grep -Eq "^$name +running " <<<"$("$CASTRA" ls)"
+
+# An idle session, collected before the container is first stopped. It has to
+# outlive OpenSSH's keepalive limit: with ServerAliveInterval 30 and the
+# default ServerAliveCountMax 3, a server that never answers is dropped at
+# about 120 s.
+"$CASTRA" ssh "$name" -- sh -c 'sleep 150; echo ok' </dev/null >"$tmp/idle.out" 2>"$tmp/idle.err" &
+idle_pid=$!
 
 # ssh: where, who, and the environment of command and login sessions
 expect "pwd is the workspace" "/workspaces/$name" "$(in_ws pwd)"
@@ -117,6 +197,15 @@ login="$(printf 'printf "LOGIN %%s %%s %%s\\n" "$REMOTE_CONTAINERS" "$CASTRA_FIX
 expect "markers and remoteEnv in a login shell" "LOGIN true yes /opt/fixture/bin" "$login"
 in_ws sh -c 'exit 3'; expect "exit code passes through" 3 "$?"
 
+# a terminal: under script(1) a command gets a pty, and an interactive shell
+# sees the forwarded key and the markers. The typed line never contains the
+# marker it prints, so the terminal's echo cannot pass for the answer.
+tty_out="$(sleep 3 | pty "$CASTRA" ssh "$name" -- tty)"
+check "a command on a terminal gets a pty ($(grep -ao '/dev/pts/[0-9]*' <<<"$tty_out" | head -1))" grep -aq '/dev/pts/[0-9]' <<<"$tty_out"
+typed='printf "SHELL%s %s %s %s\n" -CHECK "$(ssh-add -l 2>&1 | grep -c castra-e2e-key)" "$REMOTE_CONTAINERS" "$CASTRA_WORKSPACE"'
+shell_out="$({ sleep 3; printf '%s\nexit\n' "$typed"; sleep 3; } | pty "$CASTRA" ssh "$name")"
+expect "an interactive shell on a terminal sees the key and the markers" "SHELL-CHECK 1 true $name" "$(grep -ao "SHELL-CHECK [0-9]* [a-z]* $name" <<<"$shell_out" | tail -1)"
+
 # the agent, per session
 agent_out="$(in_ws sh -c 'ssh-add -l 2>&1 | grep -c castra-e2e-key; echo "$SSH_AUTH_SOCK"')"
 expect "the throwaway key is listed inside" 1 "$(sed -n 1p <<<"$agent_out")"
@@ -124,12 +213,10 @@ sock="$(sed -n 2p <<<"$agent_out")"
 check "SSH_AUTH_SOCK is a per-session path under /tmp" grep -q '^/tmp/castra-agent-' <<<"$sock"
 check "the session socket is gone afterwards" "$engine" exec "$ctr" test ! -e "$sock"
 expect "the host agent socket is not mounted" 0 "$("$engine" inspect --format '{{range .Mounts}}{{.Source}}{{"\n"}}{{end}}' "$ctr" | grep -ciE 'auth-agent|ssh_auth|ssh-agent')"
-if command -v ss >/dev/null; then
-  "$CASTRA" ssh "$name" -- sleep 4 </dev/null >/dev/null 2>&1 &
-  sleep 2
-  expect "nothing of castra listens on TCP during a session" 0 "$(ss -lntp 2>/dev/null | grep -c castra)"
-  wait $! 2>/dev/null
-fi
+"$CASTRA" ssh "$name" -- sleep 4 </dev/null >/dev/null 2>&1 &
+sleep 2
+expect "nothing of castra listens on TCP during a session" 0 "$(ss -lntp 2>/dev/null | grep -c castra)"
+wait $! 2>/dev/null
 
 # plain OpenSSH, scp both ways, and the files castra wrote for this workspace
 check "plain ssh through the Include" ssh "$name.castra" true </dev/null
@@ -143,25 +230,40 @@ check "no castra key or pin on the host" test ! -e "$castra_dir/id_ed25519" -a !
 check "no host key file in the container" in_ws test ! -e /home/vscode/.castra/host_key
 
 # port forwarding both ways. The fixture runs with --network=host, so a port
-# on 127.0.0.1 inside the container is the host's own; the target is this
-# machine's sshd, whose banner proves the bytes went through.
-banner() { timeout 5 bash -c 'exec 3<>"/dev/tcp/127.0.0.1/$1" && head -c 7 <&3' _ "$1" 2>/dev/null; }
-if [ "$(banner 22)" = SSH-2.0 ]; then
-  lport=$((20000 + RANDOM % 5000)) rport=$((25000 + RANDOM % 5000))
-  ssh -o ExitOnForwardFailure=yes -N -L "127.0.0.1:$lport:127.0.0.1:22" "$name.castra" </dev/null &
-  lpid=$!
-  for _ in $(seq 1 50); do [ "$(banner "$lport")" = SSH-2.0 ] && break; sleep 0.1; done
-  expect "ssh -L carries traffic through the container" SSH-2.0 "$(banner "$lport")"
-  kill "$lpid" 2>/dev/null; wait "$lpid" 2>/dev/null
-  ssh -o ExitOnForwardFailure=yes -N -R "127.0.0.1:$rport:127.0.0.1:22" "$name.castra" </dev/null &
-  rpid=$!
-  for _ in $(seq 1 50); do [ "$(in_ws bash -c 'exec 3<>"/dev/tcp/127.0.0.1/$1" && head -c 7 <&3' _ "$rport")" = SSH-2.0 ] && break; sleep 0.1; done
-  expect "ssh -R carries traffic back out of the container" SSH-2.0 "$(in_ws bash -c 'exec 3<>"/dev/tcp/127.0.0.1/$1" && head -c 7 <&3' _ "$rport")"
-  kill "$rpid" 2>/dev/null; wait "$rpid" 2>/dev/null
-  sleep 1
-  refute "the -R listener closes with its connection" in_ws bash -c 'exec 3<>"/dev/tcp/127.0.0.1/$1"' _ "$rport"
+# on 127.0.0.1 inside the container is this machine's own; the target is the
+# test's sshd, whose banner proves the bytes went through.
+lport=$((20000 + RANDOM % 5000)) rport=$((25000 + RANDOM % 5000))
+ssh -o ExitOnForwardFailure=yes -N -L "127.0.0.1:$lport:127.0.0.1:$sshd_port" "$name.castra" </dev/null &
+lpid=$!
+for _ in $(seq 1 50); do [ "$(banner "$lport")" = SSH-2.0 ] && break; sleep 0.1; done
+expect "ssh -L carries traffic through the container" SSH-2.0 "$(banner "$lport")"
+kill "$lpid" 2>/dev/null; wait "$lpid" 2>/dev/null
+ssh -o ExitOnForwardFailure=yes -N -R "127.0.0.1:$rport:127.0.0.1:$sshd_port" "$name.castra" </dev/null &
+rpid=$!
+for _ in $(seq 1 50); do [ "$(in_ws bash -c 'exec 3<>"/dev/tcp/127.0.0.1/$1" && head -c 7 <&3' _ "$rport")" = SSH-2.0 ] && break; sleep 0.1; done
+expect "ssh -R carries traffic back out of the container" SSH-2.0 "$(in_ws bash -c 'exec 3<>"/dev/tcp/127.0.0.1/$1" && head -c 7 <&3' _ "$rport")"
+kill "$rpid" 2>/dev/null; wait "$rpid" 2>/dev/null
+sleep 1
+refute "the -R listener closes with its connection" in_ws bash -c 'exec 3<>"/dev/tcp/127.0.0.1/$1"' _ "$rport"
+
+# host networking: a listener started inside the container answers on this
+# machine's own address, because the container has no network of its own
+host_ip="$(ip -4 route get 1.1.1.1 2>/dev/null | sed -n 's/.* src \([0-9.]*\).*/\1/p')"
+if [ -n "$host_ip" ]; then
+  hport=$((30000 + RANDOM % 5000))
+  "$CASTRA" ssh "$name" -- perl -MIO::Socket::INET -e '
+    my $s = IO::Socket::INET->new(LocalAddr => "0.0.0.0", LocalPort => $ARGV[0], Listen => 1, ReuseAddr => 1) or die "listen: $!\n";
+    my $c = $s->accept; print $c "hello from $ARGV[1]\n"; close $c' "$hport" "$name" </dev/null >/dev/null 2>&1 &
+  hpid=$!
+  got=""
+  for _ in $(seq 1 50); do
+    got="$(timeout 5 bash -c 'exec 3<>"/dev/tcp/$1/$2" && head -1 <&3' _ "$host_ip" "$hport" 2>/dev/null)" && [ -n "$got" ] && break
+    sleep 0.2
+  done
+  expect "a listener inside the container answers on this machine's address $host_ip" "hello from $name" "$got"
+  kill "$hpid" 2>/dev/null; wait "$hpid" 2>/dev/null
 else
-  echo "SKIP  port forwarding: nothing answers on 127.0.0.1:22 here to forward to"
+  skip "host networking: this machine has no route out to take its address from"
 fi
 
 # the fixture's config: mount, lifecycle hooks, ownership
@@ -170,27 +272,49 @@ check "postCreateCommand ran" in_ws test -f /tmp/castra-created
 check "postStartCommand ran" in_ws test -f /tmp/castra-started
 created="$(in_ws cat /tmp/castra-created)"
 in_ws touch "/workspaces/$name/owned"
-if [ "$(uname)" = Linux ]; then
-  expect "a file made inside is owned by the host user" "$(id -u)" "$(stat -c %u "$dir/owned")"
-fi
+expect "a file made inside is owned by the host user" "$(id -u)" "$(stat -c %u "$dir/owned")"
 
-# dotfiles over the bind-mounted remote, with the agent visible to the installer
+# dotfiles over SSH from the test's sshd, which only the throwaway key opens,
+# with the agent visible to the installer
 check "dotfiles cloned" in_ws test -d /home/vscode/dotfiles/.git
+expect "dotfiles came from the SSH remote" "$remote" "$(in_ws git -C /home/vscode/dotfiles remote get-url origin)"
+check "the test's sshd let the throwaway key in" grep -q "Accepted publickey for $(id -un) from 127.0.0.1" "$sshd_dir/log"
 check "dotfiles installer ran" in_ws test -f /home/vscode/dotfiles/.installed
 expect "the agent was forwarded during the install step" 1 "$(in_ws sh -c 'grep -c castra-e2e-key ~/dotfiles/.agent-keys')"
+ls_remote='GIT_SSH_COMMAND="ssh -o BatchMode=yes -o StrictHostKeyChecking=accept-new" git ls-remote "$1"'
+check "the remote opens through the forwarded agent" in_ws sh -c "$ls_remote >/dev/null" sh "$remote"
+out="$(env -u SSH_AUTH_SOCK "$CASTRA" ssh "$name" -- sh -c "$ls_remote" sh "$remote" </dev/null 2>&1)"; rc=$?
+check "the remote refuses a session without the agent (exit $rc)" grep -q 'Permission denied (publickey)' <<<"$out"
 installed="$(in_ws cat /home/vscode/dotfiles/.installed)"
 
 # a second up is idempotent and skips the dotfiles
 t0=$(date +%s)
-out="$("$CASTRA" up "$dir" --engine "$engine" --dotfiles /mnt/fixture/dotfiles.git </dev/null 2>&1)"; rc=$?
+out="$("$CASTRA" up "$dir" --engine "$engine" --dotfiles "$remote" </dev/null 2>&1)"; rc=$?
 took=$(( $(date +%s) - t0 ))
 expect "second up exits 0" 0 "$rc"
 expect "second up keeps the container" "$ctr" "$(ctr_id)"
 check "second up skips the dotfiles" grep -q "dotfiles already in" <<<"$out"
 expect "dotfiles installer did not rerun" "$installed" "$(in_ws cat /home/vscode/dotfiles/.installed)"
 check "second up took under 15 s ($took s)" test "$took" -lt 15
-other=docker; [ "$engine" = docker ] && other=podman
 refute "switching engines is refused" "$CASTRA" up "$dir" --engine "$other" </dev/null
+
+# A workspace keeps its engine: up by name, and an ssh that has to start the
+# container again, both find the same container on the same engine. With both
+# engines installed castra's default is podman, so on docker this is the
+# orphan bug of 2026-10-28 under test.
+check "castra up by name" "$CASTRA" up "$name" </dev/null
+expect "up by name keeps the container" "$ctr" "$(ctr_id)"
+on_other "after up by name"
+
+wait "$idle_pid"
+expect "a session idle for 150 s stays connected" ok "$(cat "$tmp/idle.out")"
+[ -s "$tmp/idle.err" ] && sed 's/^/      /' "$tmp/idle.err"
+
+"$engine" stop "$ctr" >/dev/null
+expect "stopped by $engine itself" false "$("$engine" inspect --format '{{.State.Running}}' "$ctr")"
+expect "castra ssh starts it again" back "$(in_ws echo back)"
+expect "the ssh restart keeps the container" "$ctr" "$(ctr_id)"
+on_other "after an ssh restart"
 
 # stop: the container stops but stays, and up starts the same one again
 started="$(in_ws cat /tmp/castra-started)"
@@ -199,14 +323,14 @@ expect "container is stopped" false "$("$engine" inspect --format '{{.State.Runn
 out="$("$CASTRA" stop "$name" </dev/null 2>&1)"; rc=$?
 expect "second stop exits 0" 0 "$rc"
 check "second stop says it is already stopped" grep -q "already stopped" <<<"$out"
-check "castra up after stop" "$CASTRA" up "$dir" --engine "$engine" --dotfiles /mnt/fixture/dotfiles.git </dev/null
+check "castra up after stop" "$CASTRA" up "$dir" --engine "$engine" --dotfiles "$remote" </dev/null
 expect "up after stop keeps the container" "$ctr" "$(ctr_id)"
 restarted="$(in_ws cat /tmp/castra-started)"
 check "postStartCommand ran again after stop" test -n "$restarted" -a "$restarted" != "$started"
 expect "postCreateCommand did not run again after stop" "$created" "$(in_ws cat /tmp/castra-created)"
 
 # recreate: a new container, create hooks rerun
-check "castra up --recreate" "$CASTRA" up "$dir" --engine "$engine" --dotfiles /mnt/fixture/dotfiles.git --recreate </dev/null
+check "castra up --recreate" "$CASTRA" up "$dir" --engine "$engine" --dotfiles "$remote" --recreate </dev/null
 new="$(ctr_id)"
 check "recreate changed the container id" test "$new" != "$ctr" -a -n "$new"
 expect "still one container" 1 "$(ctr_count)"
@@ -227,8 +351,11 @@ refute "ls no longer lists it" grep -q "^$name " <<<"$("$CASTRA" ls)"
 
 echo
 if [ "$failures" = 0 ]; then
-  echo "castra e2e on $engine: all checks passed"
+  echo "castra e2e on $engine: all $passes checks passed"
 else
-  echo "castra e2e on $engine: $failures check(s) failed" >&2
+  echo "castra e2e on $engine: $failures of $((passes + failures)) checks failed:" >&2
+  printf '  %s\n' "${failed[@]}" >&2
+  echo "the test's sshd log, last lines:" >&2
+  tail -n 20 "$sshd_dir/log" | sed 's/^/  /' >&2
   exit 1
 fi
